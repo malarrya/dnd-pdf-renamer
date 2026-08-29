@@ -1,0 +1,6 @@
+{
+  "xml_path": "C:\\LaunchBox\\Data\\Platforms\\YOUR_PLATFORM_NAME.xml",
+  "pdf_directory": "C:\\Path\\To\\Your\\PDF\\Collection",
+  "image_directory": "C:\\LaunchBox\\Images\\YOUR_PLATFORM_NAME\\Box - Front",
+  "output_directory": "C:\\Path\\To\\Your\\PDF\\Collection"
+}
