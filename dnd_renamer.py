@@ -8,10 +8,23 @@ import math
 import os
 import re
 import shutil
+import subprocess
 import sys
 import time
 import xml.etree.ElementTree as ET
-from pypdf import PdfReader  # Requires: pip install pypdf
+
+# --- REQUIRED: PDF READING ---
+# Unlike the OCR/cover-hash fallbacks below, nothing in this script can run
+# at all without this - so a missing pypdf isn't allowed to degrade
+# gracefully, it's caught here and resolved (or the script exits) by
+# check_dependencies() before any real work starts. PdfReader stays defined
+# as None on failure so nothing NameErrors before that exit happens.
+PYPDF_AVAILABLE = False
+try:
+    from pypdf import PdfReader
+    PYPDF_AVAILABLE = True
+except ImportError:
+    PdfReader = None
 
 # --- OPTIONAL OCR FALLBACK ---
 # A scanned book with no text layer at all (a pure image scan) gives every
@@ -23,10 +36,12 @@ from pypdf import PdfReader  # Requires: pip install pypdf
 # it's missing, OCR is silently skipped and everything else still works
 # exactly as before.
 OCR_AVAILABLE = False
+OCR_PACKAGES_AVAILABLE = False  # pytesseract/Pillow specifically, distinct from the Tesseract binary itself - see check_dependencies()
 try:
     import pytesseract
     from PIL import Image, ImageOps
 
+    OCR_PACKAGES_AVAILABLE = True
     _tesseract_cmd = shutil.which("tesseract")
     if not _tesseract_cmd:
         for candidate in (
@@ -57,6 +72,85 @@ try:
     IMAGEHASH_AVAILABLE = True
 except ImportError:
     pass
+
+
+def _offer_pip_install(package_names):
+    """Asks once, then runs `pip install` for every package in one call.
+    Returns True only if the install command itself succeeded - the
+    caller still has to re-import to confirm the package is actually
+    usable now (a stale/broken environment can make pip succeed without
+    the import actually working)."""
+    try:
+        answer = input(f"  Install now via pip ({' '.join(package_names)})? [Y/n]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return False
+    if answer in ("n", "no"):
+        return False
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", *package_names])
+        return True
+    except Exception as e:
+        print(f"  Install failed: {e}")
+        return False
+
+
+def check_dependencies():
+    """Verifies pypdf - the one package nothing here can run without - is
+    actually importable, offering to pip install it on the spot rather
+    than crashing on the first PdfReader() call with a bare traceback.
+    Everything else (OCR, cover-image matching) already degrades
+    gracefully by design (see OCR_AVAILABLE/IMAGEHASH_AVAILABLE above),
+    so those are reported here only as informational notes - never
+    fatal - once, up front, so a silently-disabled feature doesn't look
+    like a bug three layers deep in a run."""
+    global PdfReader, PYPDF_AVAILABLE
+
+    if not PYPDF_AVAILABLE:
+        print("=" * 50)
+        print("  Missing required package: pypdf")
+        print("  This script can't read any PDF at all without it.")
+        print("=" * 50)
+        if _offer_pip_install(["pypdf"]):
+            try:
+                from pypdf import PdfReader as _PdfReader
+                PdfReader = _PdfReader
+                PYPDF_AVAILABLE = True
+                print("  pypdf installed successfully.\n")
+            except ImportError:
+                pass
+        if not PYPDF_AVAILABLE:
+            print("  Install it manually, then run this script again:")
+            print("    pip install pypdf")
+            sys.exit(1)
+
+    notes = []
+    if not OCR_PACKAGES_AVAILABLE:
+        notes.append(
+            "  OCR fallback (for scanned PDFs with no text layer) is disabled.\n"
+            "    Install with:  pip install pytesseract Pillow\n"
+            "    Also requires the Tesseract OCR engine itself - a separate,\n"
+            "    non-Python install (e.g. `winget install UB-Mannheim.TesseractOCR`\n"
+            "    on Windows, or the tesseract-ocr package via apt/brew elsewhere)."
+        )
+    elif not OCR_AVAILABLE:
+        notes.append(
+            "  OCR fallback is disabled: pytesseract/Pillow are installed, but the\n"
+            "    Tesseract OCR engine itself wasn't found on this machine. Install it\n"
+            "    separately (e.g. `winget install UB-Mannheim.TesseractOCR` on Windows,\n"
+            "    or the tesseract-ocr package via apt/brew elsewhere) and run again."
+        )
+    if not IMAGEHASH_AVAILABLE:
+        notes.append(
+            "  Cover-image matching fallback is disabled.\n"
+            "    Install with:  pip install imagehash"
+        )
+
+    if notes:
+        print("=" * 50)
+        print("  Optional features unavailable (everything else still works):")
+        for note in notes:
+            print(note)
+        print("=" * 50 + "\n")
 
 
 # A page with body text printed over a colored background (common on back
@@ -2099,5 +2193,6 @@ def run_matching_agent():
 
 
 if __name__ == "__main__":
+    check_dependencies()
     configure_paths()
     run_matching_agent()
