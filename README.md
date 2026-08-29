@@ -30,11 +30,13 @@ Optional, for scanned PDFs with no embedded text layer:
 - [`pytesseract`](https://pypi.org/project/pytesseract/) and [`Pillow`](https://pypi.org/project/Pillow/), plus the [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) engine itself (a separate system install — e.g. `winget install UB-Mannheim.TesseractOCR` on Windows, or `tesseract-ocr` via `apt`/`brew` elsewhere)
 - [`imagehash`](https://pypi.org/project/ImageHash/), for the cover-image matching fallback
 
-If the optional pieces aren't installed, OCR and cover-image matching are silently skipped and everything else still works.
+If the optional pieces aren't installed, OCR and cover-image matching are skipped (with a note printed at startup) and everything else still works.
 
 ```bash
 pip install pypdf pytesseract Pillow imagehash
 ```
+
+You don't strictly have to run this yourself first: on startup, the script checks whether `pypdf` is importable and, if not, offers to `pip install` it for you on the spot. Missing optional packages (or a missing Tesseract engine) are reported the same way, just as non-fatal notes rather than a blocking prompt.
 
 ## Setup
 
