@@ -60,6 +60,8 @@ python dnd_renamer.py
 
 The script scans your PDF folder in parallel, reports how many files it confidently matched, and offers to walk you through best-guess suggestions for anything left unmatched. Nothing is renamed without either a confident automated match or your explicit confirmation.
 
+If you're renaming in place (output folder same as PDF folder) and a previous run already confirmed some files, you'll be asked whether to do a **full** scan (re-verify every file's content from scratch) or an **incremental** one (skip any file whose size and modified time haven't changed since it was last confirmed, and only scan what's new or changed). Incremental scans avoid the full-file read needed to re-verify each PDF, which matters most when the PDF folder is on a network share.
+
 ## Beyond D&D Classic Editions
 
 The matching logic isn't specific to any one catalog — it works from whatever XML platform file and image folder you point it at. Pointing it at a different LaunchBox platform (e.g. a D&D 5th Edition catalog) should work the same way, no code changes needed.

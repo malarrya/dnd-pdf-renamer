@@ -1,4 +1,5 @@
 import concurrent.futures
+from collections import Counter
 import difflib
 import hashlib
 import io
@@ -268,6 +269,11 @@ CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dnd_rena
 # CONFIG_PATH, so it travels with a distributed copy automatically.
 CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dnd_renamer_cache.json")
 
+# Same idea as CACHE_PATH, but keyed by filename instead of content hash -
+# see load_scan_index for why a separate index is needed for incremental
+# scans.
+SCAN_INDEX_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dnd_renamer_scan_index.json")
+
 
 def _strip_quotes(raw):
     # Windows Explorer's "Copy as path" wraps the value in quotes.
@@ -422,7 +428,7 @@ STOPWORDS = {
     # Short function words - never discriminating on their own, but short
     # enough (unlike most words above) to survive significant_words'
     # length floor by accident in Layer 3's weaker filter (see pdf_tokens
-    # in identify_file) - explicitly excluded there rather than relying
+    # in identify_file_pass2) - explicitly excluded there rather than relying
     # on length alone, since real short codes like "s2"/"b3"/"iq2" need
     # to survive that same filter.
     'an', 'of', 'on', 'in', 'to', 'or', 'as', 'at', 'by', 'is', 'it',
@@ -532,7 +538,7 @@ def ocr_front_pages(reader, max_pages=OCR_MAX_PAGES):
     of recovering the book's own stated title, so this deliberately does
     NOT try to OCR the whole document; that would be far too slow across
     a large catalogue for marginal additional benefit. This is the
-    lower-yield OCR path (see identify_file for why it's tried only after
+    lower-yield OCR path (see identify_file_pass2 for why it's tried only after
     the back cover has already had a chance) - it's still kept as a
     fallback since a legible front title page can succeed here even when
     the back cover can't. Deliberately uses plain OCR, not the
@@ -568,12 +574,13 @@ def analyze_pdf_internals(reader):
     document - those are the pages most likely to state the book's
     actual title, regardless of what the file happens to be named right
     now. OCR fallback is applied later, as its own explicit steps in
-    identify_file - trying the cheaper, more productive back-cover check
-    first before spending time on the broader (and less often decisive)
-    front-page OCR pass. See ocr_back_cover_text() and ocr_front_pages().
-    Takes an already-open PdfReader (identify_file opens exactly one per
-    file and shares it across every layer, rather than each layer
-    re-opening and re-parsing the same file over the network)."""
+    identify_file_pass2 - trying the cheaper, more productive back-cover
+    check first before spending time on the broader (and less often
+    decisive) front-page OCR pass. See ocr_back_cover_text() and
+    ocr_front_pages(). Takes an already-open PdfReader (each identify_file_
+    pass1/identify_file_pass2 call opens exactly one per file and shares it
+    across its own layers, rather than each layer re-opening and
+    re-parsing the same file over the network)."""
     page_count = 0
     internal_text = ""
     try:
@@ -634,6 +641,93 @@ def save_fingerprint_cache(cache_path, cache):
             json.dump(cache, f, indent=2, sort_keys=True)
     except Exception as e:
         print(f"⚠️  Could not save fingerprint cache: {e}")
+
+
+def load_scan_index(path):
+    """filename -> {'size', 'mtime', 'sha256'}, recorded the last time that
+    exact filename was scanned and confidently identified. An incremental
+    scan (see partition_for_incremental_scan) trusts an entry only while the
+    file's live size and mtime still match what's recorded here - computing
+    the SHA256 needed for the fingerprint cache (see hash_file_sha256)
+    requires reading the whole file, which is exactly the cost an
+    incremental scan exists to avoid for files nothing has touched since
+    they were last confirmed. Size+mtime both matching is as strong a
+    proxy for "unchanged" as is available without paying that cost - a
+    coincidental match on both for genuinely different content isn't
+    realistically possible. Missing or unreadable index is just an empty
+    index, never a hard error."""
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_scan_index(path, index):
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(index, f, indent=2, sort_keys=True)
+    except Exception as e:
+        print(f"⚠️  Could not save scan index: {e}")
+
+
+def partition_for_incremental_scan(pdf_files, pdf_directory, scan_index, fingerprint_cache):
+    """Splits pdf_files into (skip_plans, to_scan_files) for an incremental
+    scan. skip_plans is in the same (pdf_file, full_pdf_path,
+    target_final_title, match_method) shape _run_parallel_scan produces, so
+    callers can merge the two uniformly. A file is skipped only when its
+    filename was indexed before (see load_scan_index) AND its live size and
+    mtime still match what was recorded AND the fingerprint cache still has
+    a confirmed title for that recorded SHA256 - any of those failing just
+    means a real scan, same as if it had never been indexed at all."""
+    skip_plans = []
+    to_scan_files = []
+    for pdf_file in pdf_files:
+        entry = scan_index.get(pdf_file)
+        cached = entry and fingerprint_cache.get(entry.get("sha256"))
+        cached_title = cached.get("title") if cached else None
+        full_pdf_path = os.path.join(pdf_directory, pdf_file)
+        if not cached_title:
+            to_scan_files.append(pdf_file)
+            continue
+        try:
+            stat = os.stat(full_pdf_path)
+        except OSError:
+            to_scan_files.append(pdf_file)
+            continue
+        if stat.st_size != entry.get("size") or stat.st_mtime != entry.get("mtime"):
+            to_scan_files.append(pdf_file)
+            continue
+        skip_plans.append((
+            pdf_file, full_pdf_path, cached_title,
+            "Fingerprint Cache -> Skipped (incremental scan, unchanged since last run)",
+        ))
+    return skip_plans, to_scan_files
+
+
+def prompt_scan_mode(skip_candidate_count, total_count):
+    """Asks whether to run a full scan (every file re-verified by content)
+    or an incremental one (files unchanged since a previous confirmed match
+    are trusted without re-reading them). Only called when there's at least
+    one file the incremental path could actually skip."""
+    print(f"\n{skip_candidate_count} of {total_count} PDFs are unchanged (same size and modified time) "
+          f"since they were last confidently identified.")
+    while True:
+        try:
+            answer = input(
+                "Scan (F)ull - re-verify every file, or (I)ncremental - skip those and only scan the rest? [F/i]: "
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\nDefaulting to a full scan.")
+            return "full"
+        if answer in ("", "f", "full"):
+            return "full"
+        if answer in ("i", "incremental"):
+            return "incremental"
+        print("  Please enter 'f' or 'i'.\n")
 
 
 def load_image_library(image_dir):
@@ -1323,14 +1417,26 @@ def back_cover_match(reader, xml_items, clean_pdf_name=None):
     return None, None
 
 
-def identify_file(pdf_file, full_pdf_path, xml_items, image_library, idf_table,
-                   fingerprint_cache=None, cover_hash_index=None, unclaimed_xml_items=None):
-    """Runs every identification layer for one PDF - fingerprint cache
-    first, content-based next, legacy filename-token matching as a last
-    resort - and returns (target_final_title_or_None, match_method,
-    file_sha256_or_None). The hash is always returned (whether or not it
-    hit the cache) so the caller can seed the cache with any new
-    high-confidence match without re-reading the file."""
+def identify_file_pass1(pdf_file, full_pdf_path, xml_items, image_library, idf_table,
+                         fingerprint_cache=None):
+    """First pass, run for every file before identify_file_pass2 touches
+    any of them: the fingerprint cache, the Deities & Demigods override,
+    and full-catalogue content-based matching (plus its blank-form
+    fallback) - every layer that's both filename-independent and doesn't
+    need OCR or a precomputed "unclaimed catalogue entries" pool. Returns
+    (target_final_title_or_None, match_method, file_sha256_or_None). The
+    hash is always returned (whether or not it hit the cache) so the
+    caller can seed the cache - or hand it to identify_file_pass2 - without
+    re-reading the file.
+
+    Splitting the scan into two passes like this exists specifically so
+    unclaimed_pool_match's pool (used by identify_file_pass2) can be
+    computed from this pass's REAL, whole-batch results instead of
+    guessing from on-disk filenames at scan start - a file sitting under a
+    temporary or wrong name mid-batch used to make its own true catalogue
+    entry look falsely "unclaimed" to every other file's process-of-
+    elimination layer, which is exactly what let a single generic-scoring
+    entry silently absorb dozens of unrelated files in one real run."""
     filename_no_ext, _ = os.path.splitext(pdf_file)
 
     clean_pdf_name = clean_string(filename_no_ext)
@@ -1480,13 +1586,48 @@ def identify_file(pdf_file, full_pdf_path, xml_items, image_library, idf_table,
             target_final_title = resolve_display_name(best_xml, image_library)
             match_method = method
 
+    return target_final_title, match_method, file_sha256
+
+
+def identify_file_pass2(pdf_file, full_pdf_path, file_sha256, xml_items, image_library, idf_table,
+                         unclaimed_xml_items, cover_hash_index=None):
+    """Second pass - only for files identify_file_pass1 couldn't resolve.
+    Re-opens the PDF (an open PdfReader can't be carried across the two
+    separate process-pool dispatches pass1 and pass2 run as, so this is a
+    genuine second read - accepted as the cost of computing
+    unclaimed_xml_items correctly instead of guessing it) and runs every
+    remaining layer: process-of-elimination against unclaimed_xml_items
+    (computed by the caller from pass1's whole-batch results - see
+    identify_file_pass1), cover-image hashing, OCR, and the low-confidence
+    legacy filename/substring fallbacks. file_sha256 is whatever
+    identify_file_pass1 already computed for this file, passed through
+    rather than re-hashed. Returns (target_final_title_or_None,
+    match_method, file_sha256)."""
+    filename_no_ext, _ = os.path.splitext(pdf_file)
+    clean_pdf_name = clean_string(filename_no_ext)
+    pdf_tokens = [t for t in clean_pdf_name.split() if len(t) > 1 and t not in STOPWORDS]
+
+    target_final_title = None
+    match_method = "None"
+
+    try:
+        file_size = os.path.getsize(full_pdf_path)
+    except Exception:
+        file_size = 0
+    try:
+        reader = PdfReader(full_pdf_path)
+    except Exception:
+        reader = None
+
+    page_count, internal_text = analyze_pdf_internals(reader) if reader else (0, "")
+
     # -----------------------------------------------------------------
     # LAYER 2-EL: PROCESS OF ELIMINATION (see unclaimed_pool_match) -
     # native-text only, tried before any image-touching layer below on
     # purpose (see that function's docstring for why). Restricted to
-    # whatever catalogue entries nothing else on disk has already
-    # claimed, which is what makes a much lower score threshold safe here
-    # than content_based_match uses against the full catalogue.
+    # whatever catalogue entries pass1 didn't already claim across the
+    # whole batch, which is what makes a much lower score threshold safe
+    # here than content_based_match uses against the full catalogue.
     # -----------------------------------------------------------------
     if not target_final_title:
         best_xml, method = unclaimed_pool_match(internal_text, page_count, file_size, unclaimed_xml_items, idf_table)
@@ -1631,6 +1772,19 @@ def identify_file(pdf_file, full_pdf_path, xml_items, image_library, idf_table,
     return target_final_title, match_method, file_sha256
 
 
+def safe_pdf_filename(target_final_title):
+    """Turns a resolved target_final_title into the exact filename
+    execute_renames will actually use on disk: Windows-illegal characters
+    stripped, then '.pdf' appended. target_final_title itself never carries
+    the extension (every identify_file_pass1/identify_file_pass2 layer
+    returns a bare title) - shared here so any check comparing a resolved
+    target against a real on-disk filename (like the same-batch collision
+    checks in run_matching_agent) compares apples to apples instead of
+    silently never matching."""
+    safe_title = "".join(c for c in target_final_title if c not in '<>:"/\\|?*').strip()
+    return f"{safe_title}.pdf"
+
+
 def execute_renames(plans, output_directory):
     """Two-phase collision-safe execution: every source that needs to move
     is first shifted to a temporary name (Phase 1), then every temp file is
@@ -1645,7 +1799,7 @@ def execute_renames(plans, output_directory):
 
     reserved_names = set()
     results = []  # (pdf_file, match_method, final_filename_or_None, already_correct)
-    move_list = []  # (pdf_file, temp_path, safe_title, match_method)
+    move_list = []  # (pdf_file, temp_path, wanted_name, match_method)
     pending_temp_moves = {}  # temp_path -> original_full_path, for rollback on cancel
     pending_final = {}  # temp_path -> (pdf_file, match_method, new_filename), for the Phase 2
                          # rename currently in flight - lets a KeyboardInterrupt landing right
@@ -1668,10 +1822,7 @@ def execute_renames(plans, output_directory):
                 results.append((pdf_file, match_method, None, False))
                 continue
 
-            # Strip characters that are illegal in Windows filenames, since
-            # XML titles / image names can contain things like ":" or "?".
-            safe_title = "".join(c for c in target_final_title if c not in '<>:"/\\|?*').strip()
-            wanted_name = f"{safe_title}.pdf"
+            wanted_name = safe_pdf_filename(target_final_title)
 
             if wanted_name == pdf_file:
                 reserved_names.add(wanted_name)
@@ -1689,7 +1840,7 @@ def execute_renames(plans, output_directory):
             pending_temp_moves[temp_path] = full_pdf_path
             try:
                 os.rename(full_pdf_path, temp_path)
-                move_list.append((pdf_file, temp_path, safe_title, match_method))
+                move_list.append((pdf_file, temp_path, wanted_name, match_method))
             except Exception as e:
                 del pending_temp_moves[temp_path]  # the move never happened - nothing to roll back
                 results.append((pdf_file, f"{match_method} [FAILED]", None, False))
@@ -1703,14 +1854,15 @@ def execute_renames(plans, output_directory):
         # different books whose computed titles happen to coincide - and
         # still gets the numbered " (2)", " (3)", ... treatment rather than
         # overwriting.
-        for pdf_file, temp_path, safe_title, match_method in move_list:
-            new_filename = f"{safe_title}.pdf"
+        for pdf_file, temp_path, wanted_name, match_method in move_list:
+            new_filename = wanted_name
             new_path = os.path.join(output_directory, new_filename)
+            base_name = wanted_name[:-len(".pdf")] if wanted_name.lower().endswith(".pdf") else wanted_name
 
             counter = 1
             while new_filename in reserved_names or os.path.exists(new_path):
                 counter += 1
-                new_filename = f"{safe_title} ({counter}).pdf"
+                new_filename = f"{base_name} ({counter}).pdf"
                 new_path = os.path.join(output_directory, new_filename)
 
             pending_final[temp_path] = (pdf_file, match_method, new_filename)
@@ -1791,26 +1943,28 @@ SCAN_WORKERS = min(os.cpu_count() or 4, 8)
 _worker_context = {}
 
 
-def _init_scan_worker(xml_path, image_dir, cache_path, pdf_directory=None):
+def _ignore_sigint():
+    # On Windows (and POSIX), SIGINT is delivered to every process in the
+    # console's process group, not just the parent - so without this,
+    # every idle worker independently receives the interrupt too and each
+    # prints its own "Process SpawnProcess-N: Traceback ...
+    # KeyboardInterrupt" noise, on top of the real one. Only the main
+    # process is meant to react to Ctrl+C (see the explicit
+    # executor.shutdown(cancel_futures=True) call in run_matching_agent /
+    # review_unmatched_interactively); workers should just keep working
+    # until told to stop.
+    import signal
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+
+def _init_scan_worker_pass1(xml_path, image_dir, cache_path):
     """Runs once per worker process, not once per file. ProcessPoolExecutor
     spawns each worker as a fresh Python process that re-imports this
     module from scratch - none of the main process's globals (including
     whatever configure_paths() set) carry over automatically - so this
-    loads everything identify_file needs exactly once per worker and
-    stashes it in a module-level dict the worker's own calls can reach.
-
-    Also makes each worker ignore Ctrl+C entirely. On Windows (and POSIX),
-    SIGINT is delivered to every process in the console's process group,
-    not just the parent - so without this, every idle worker independently
-    receives the interrupt too and each prints its own "Process SpawnProcess-N:
-    Traceback ... KeyboardInterrupt" noise, on top of the real one. Only the
-    main process is meant to react to Ctrl+C (see the explicit
-    executor.shutdown(cancel_futures=True) call in run_matching_agent /
-    review_unmatched_interactively); workers should just keep working
-    until told to stop."""
-    import signal
-    signal.signal(signal.SIGINT, signal.SIG_IGN)
-
+    loads everything identify_file_pass1 needs exactly once per worker and
+    stashes it in a module-level dict the worker's own calls can reach."""
+    _ignore_sigint()
     xml_items = load_launchbox_db(xml_path)
     mark_generic_placeholders_with_siblings(xml_items)
     _worker_context['xml_items'] = xml_items
@@ -1818,51 +1972,55 @@ def _init_scan_worker(xml_path, image_dir, cache_path, pdf_directory=None):
     _worker_context['idf_table'] = build_idf_table(xml_items)
     _worker_context['fingerprint_cache'] = load_fingerprint_cache(cache_path)
 
-    # Snapshot of what's already correctly identified on disk right now,
-    # for unclaimed_pool_match's process-of-elimination layer. Computed
-    # once here (not refreshed as the batch progresses) - see that
-    # function's docstring for why a same-run race between two workers is
-    # an acceptable, safely-contained risk rather than one worth
-    # coordinating across processes for. Defaults to empty (layer
-    # disabled) rather than the full catalogue on any failure - unclaimed_
-    # pool_match's low score floor is only safe against the small
-    # leftover pool it was calibrated on, never at full-catalogue scale.
-    unclaimed_xml_items = []
-    if pdf_directory:
-        try:
-            on_disk_names = {
-                os.path.splitext(f)[0] for f in os.listdir(pdf_directory) if f.lower().endswith('.pdf')
-            }
-            unclaimed_xml_items = [
-                item for item in xml_items
-                if resolve_display_name(item, _worker_context['image_library']) not in on_disk_names
-            ]
-        except Exception:
-            pass
-    _worker_context['unclaimed_xml_items'] = unclaimed_xml_items
 
-
-def _scan_worker(pdf_file, full_pdf_path):
-    """Top-level, picklable per-file entry point for a scan worker process -
-    pulls the catalogue data _init_scan_worker already loaded once,
+def _scan_worker_pass1(pdf_file, full_pdf_path):
+    """Top-level, picklable per-file entry point for a pass-1 scan worker -
+    pulls the catalogue data _init_scan_worker_pass1 already loaded once,
     rather than re-loading (or re-pickling across the process boundary)
     it for every single file."""
     ctx = _worker_context
-    return identify_file(
+    return identify_file_pass1(
         pdf_file, full_pdf_path,
         ctx['xml_items'], ctx['image_library'], ctx['idf_table'], ctx['fingerprint_cache'],
-        None,
-        unclaimed_xml_items=ctx.get('unclaimed_xml_items'),
+    )
+
+
+def _init_scan_worker_pass2(xml_path, image_dir, cache_path, unclaimed_xml_items):
+    """Like _init_scan_worker_pass1, but for pass-2 workers: takes
+    unclaimed_xml_items as computed by the caller from pass 1's actual,
+    whole-batch results (see identify_file_pass1 and run_matching_agent)
+    instead of guessing it from on-disk filenames itself. fingerprint_cache
+    isn't loaded here - every file reaching pass 2 already missed it in
+    pass 1, and nothing in pass 2 checks it again."""
+    _ignore_sigint()
+    xml_items = load_launchbox_db(xml_path)
+    mark_generic_placeholders_with_siblings(xml_items)
+    _worker_context['xml_items'] = xml_items
+    _worker_context['image_library'] = load_image_library(image_dir)
+    _worker_context['idf_table'] = build_idf_table(xml_items)
+    _worker_context['unclaimed_xml_items'] = unclaimed_xml_items
+
+
+def _scan_worker_pass2(pdf_file, full_pdf_path, file_sha256):
+    """Top-level, picklable per-file entry point for a pass-2 scan worker.
+    file_sha256 is whatever pass 1 already computed for this file (see
+    identify_file_pass1), passed through rather than re-hashed."""
+    ctx = _worker_context
+    return identify_file_pass2(
+        pdf_file, full_pdf_path, file_sha256,
+        ctx['xml_items'], ctx['image_library'], ctx['idf_table'],
+        ctx['unclaimed_xml_items'],
     )
 
 
 def _guess_worker(pdf_file, full_pdf_path):
     """Top-level, picklable per-file entry point for computing a best-
     guess suggestion (see best_guess_for_unmatched) in a worker process -
-    same rationale as _scan_worker: pulls catalogue data already loaded
-    once by _init_scan_worker instead of reloading it per file. Returns
-    (pdf_file, full_pdf_path, guess_or_None) so the caller can match
-    results back up after they complete out of submission order."""
+    same rationale as _scan_worker_pass1: pulls catalogue data already
+    loaded once by _init_scan_worker_pass1 instead of reloading it per
+    file. Returns (pdf_file, full_pdf_path, guess_or_None) so the caller
+    can match results back up after they complete out of submission
+    order."""
     ctx = _worker_context
     guess = best_guess_for_unmatched(full_pdf_path, ctx['xml_items'], ctx['image_library'], ctx['idf_table'])
     return pdf_file, full_pdf_path, guess
@@ -1893,8 +2051,8 @@ def review_unmatched_interactively(unmatched, output_directory, fingerprint_cach
     print("\nComputing suggestions (this re-uses the same OCR/content analysis as the main scan)...")
     executor = concurrent.futures.ProcessPoolExecutor(
         max_workers=SCAN_WORKERS,
-        initializer=_init_scan_worker,
-        initargs=(XML_PATH, IMAGE_DIRECTORY, CACHE_PATH, PDF_DIRECTORY),
+        initializer=_init_scan_worker_pass1,
+        initargs=(XML_PATH, IMAGE_DIRECTORY, CACHE_PATH),
     )
     guesses = {}  # pdf_file -> (full_pdf_path, guess_or_None)
     try:
@@ -1974,19 +2132,22 @@ SCAN_TASK_TIMEOUT = 240  # seconds - generous: the slowest legitimate file
 # retried into the same hang.
 
 
-def _run_parallel_scan(file_pairs):
-    """Runs _scan_worker across a process pool for every (pdf_file,
-    full_pdf_path) pair, rebuilding the pool whenever a single task
-    exceeds SCAN_TASK_TIMEOUT so one pathological PDF can never hang
-    the entire scan. Keeps at most SCAN_WORKERS tasks in flight at
-    once and tracks each one's OWN dispatch time individually, rather
-    than one shared clock for the whole batch - found the hard way:
-    with more files queued than workers, most tasks sit waiting behind
-    others before any worker touches them, and timing from batch-
-    submission then flags those as "stuck" purely for still being in
-    line - a real production bug that wrongly skipped well-tested,
-    sub-second files (including one of the regression-set files
-    itself) in a 247-file batch on an 8-worker pool. Returns
+def _run_parallel_scan(file_pairs, dispatch, init_fn, init_args, progress_verb="Scanning"):
+    """Runs `dispatch(executor, pdf_file, full_pdf_path)` across a process
+    pool for every (pdf_file, full_pdf_path) pair, rebuilding the pool
+    whenever a single task exceeds SCAN_TASK_TIMEOUT so one pathological
+    PDF can never hang the entire scan. `init_fn`/`init_args` set up each
+    fresh worker process (see _init_scan_worker_pass1/_init_scan_worker_
+    pass2) - parametrized so this same loop drives both scan passes (see
+    run_matching_agent) rather than duplicating it. Keeps at most
+    SCAN_WORKERS tasks in flight at once and tracks each one's OWN
+    dispatch time individually, rather than one shared clock for the whole
+    batch - found the hard way: with more files queued than workers, most
+    tasks sit waiting behind others before any worker touches them, and
+    timing from batch-submission then flags those as "stuck" purely for
+    still being in line - a real production bug that wrongly skipped
+    well-tested, sub-second files (including one of the regression-set
+    files itself) in a 247-file batch on an 8-worker pool. Returns
     (plans, file_hashes, cache_hits). Raises KeyboardInterrupt after
     tearing down whatever pool is currently active - nothing is left
     running in the background either way."""
@@ -2000,8 +2161,8 @@ def _run_parallel_scan(file_pairs):
     def new_executor():
         return concurrent.futures.ProcessPoolExecutor(
             max_workers=SCAN_WORKERS,
-            initializer=_init_scan_worker,
-            initargs=(XML_PATH, IMAGE_DIRECTORY, CACHE_PATH, PDF_DIRECTORY),
+            initializer=init_fn,
+            initargs=init_args,
         )
 
     def kill_pool(executor):
@@ -2018,7 +2179,7 @@ def _run_parallel_scan(file_pairs):
     def refill():
         while queue and len(futures) < SCAN_WORKERS:
             pdf_file, full_pdf_path = queue.pop(0)
-            future = executor.submit(_scan_worker, pdf_file, full_pdf_path)
+            future = dispatch(executor, pdf_file, full_pdf_path)
             futures[future] = (pdf_file, full_pdf_path, time.time())
 
     try:
@@ -2040,7 +2201,7 @@ def _run_parallel_scan(file_pairs):
                     cache_hits += 1
 
                 completed += 1
-                progress_label = f"  Scanning ({completed}/{total_files}): {pdf_file}"
+                progress_label = f"  {progress_verb} ({completed}/{total_files}): {pdf_file}"
                 print(progress_label[:100].ljust(100), end="\r", flush=True)
 
             now = time.time()
@@ -2098,8 +2259,8 @@ def run_matching_agent():
     # cover scored a better distance than the correct one. No threshold
     # separates them safely, and it wasn't even faster than OCR (network/
     # decode cost dominates, not text recognition). Kept in the code as a
-    # validated dead end rather than wired in - see identify_file's Layer
-    # 2A, which is a no-op whenever cover_hash_index is falsy.
+    # validated dead end rather than wired in - see identify_file_pass2's
+    # Layer 2A, which is a no-op whenever cover_hash_index is falsy.
     cover_hash_index = None
 
     print(f"Loaded {len(image_library)} Image names and {len(xml_items)} XML entries.")
@@ -2125,7 +2286,28 @@ def run_matching_agent():
 
     pdf_files = [f for f in os.listdir(PDF_DIRECTORY) if f.lower().endswith('.pdf')]
     total_files = len(pdf_files)
-    print(f"Scanning {total_files} PDFs using ALL investigative methods ({SCAN_WORKERS} workers in parallel)...")
+
+    # The scan index (see load_scan_index) only means anything for files
+    # that stay put after being confirmed - if the output folder is
+    # somewhere else, a confirmed file is moved out of PDF_DIRECTORY
+    # entirely and simply won't be listed here again next time anyway.
+    renaming_in_place = (
+        os.path.normcase(os.path.normpath(PDF_DIRECTORY))
+        == os.path.normcase(os.path.normpath(OUTPUT_DIRECTORY))
+    )
+    scan_index = load_scan_index(SCAN_INDEX_PATH) if renaming_in_place else {}
+
+    skip_plans, to_scan_files = [], pdf_files
+    if scan_index:
+        skip_plans, to_scan_files = partition_for_incremental_scan(
+            pdf_files, PDF_DIRECTORY, scan_index, fingerprint_cache
+        )
+        if skip_plans and prompt_scan_mode(len(skip_plans), total_files) == "full":
+            skip_plans, to_scan_files = [], pdf_files
+
+    print(f"Scanning {len(to_scan_files)} PDFs using ALL investigative methods ({SCAN_WORKERS} workers in parallel)...")
+    if skip_plans:
+        print(f"({len(skip_plans)} unchanged, previously-confirmed file(s) skipped - incremental scan.)")
     print("(Press Ctrl+C at any time to cancel. Nothing is renamed until the scan below finishes,")
     print(" and any rename already in progress when cancelled is safely undone.)\n")
 
@@ -2148,14 +2330,127 @@ def run_matching_agent():
     # guarantee above for whatever's still queued. Shutting down
     # explicitly in each branch below keeps cancellation immediate.
     try:
-        file_pairs = [(pdf_file, os.path.join(PDF_DIRECTORY, pdf_file)) for pdf_file in pdf_files]
-        plans, file_hashes, cache_hits = _run_parallel_scan(file_pairs)
+        # PASS 1: fingerprint cache + full-catalogue content match for
+        # every file that needs scanning - no OCR, no process-of-
+        # elimination yet (see identify_file_pass1).
+        file_pairs = [(pdf_file, os.path.join(PDF_DIRECTORY, pdf_file)) for pdf_file in to_scan_files]
+        pass1_plans, file_hashes, cache_hits = _run_parallel_scan(
+            file_pairs,
+            dispatch=lambda ex, f, p: ex.submit(_scan_worker_pass1, f, p),
+            init_fn=_init_scan_worker_pass1,
+            init_args=(XML_PATH, IMAGE_DIRECTORY, CACHE_PATH),
+        )
+
+        # The "unclaimed catalogue entries" pool for pass 2's process-of-
+        # elimination layer (see unclaimed_pool_match), computed from pass
+        # 1's REAL, whole-batch results plus this run's incremental-scan
+        # skips - not guessed from on-disk filenames at scan start. That
+        # guess was the root cause of a real incident: a file scanned
+        # under a temporary or wrong name made its own true catalogue
+        # entry look falsely "unclaimed" to every other file's process-
+        # of-elimination layer, letting one generic-scoring entry silently
+        # absorb dozens of unrelated files in a single run.
+        # resolve_display_name (used below) never returns a '.pdf'
+        # extension, and neither does target_final_title (see
+        # safe_pdf_filename) - so a skipped file's own filename has its
+        # extension stripped too, to compare like with like.
+        claimed_names = {target for _, _, target, _ in pass1_plans if target}
+        claimed_names.update(os.path.splitext(pdf_file)[0] for pdf_file, *_r in skip_plans)
+        unclaimed_xml_items = [
+            item for item in xml_items
+            if resolve_display_name(item, image_library) not in claimed_names
+        ]
+
+        still_unresolved = [
+            (pdf_file, full_pdf_path) for pdf_file, full_pdf_path, target, _ in pass1_plans if not target
+        ]
+        pass2_by_name = {}
+        if still_unresolved:
+            print(" " * 100, end="\r")
+            print(f"Pass 1 complete. Running deeper identification (process of elimination, "
+                  f"OCR) on {len(still_unresolved)} still-unmatched file(s)...\n")
+            pass2_plans, pass2_hashes, _ = _run_parallel_scan(
+                still_unresolved,
+                dispatch=lambda ex, f, p: ex.submit(_scan_worker_pass2, f, p, file_hashes[f]),
+                init_fn=_init_scan_worker_pass2,
+                init_args=(XML_PATH, IMAGE_DIRECTORY, CACHE_PATH, unclaimed_xml_items),
+                progress_verb="Deeper scan",
+            )
+            file_hashes.update(pass2_hashes)
+
+            # None of pass 2's layers (process-of-elimination, OCR, the
+            # low-confidence legacy filename/substring fallbacks) can see
+            # another still-unresolved file in the SAME batch independently
+            # landing on the identical catalogue entry - unclaimed_xml_items
+            # is a snapshot taken once before pass 2 starts, not updated
+            # live as results come in (see unclaimed_pool_match's own
+            # docstring). A real incident showed this isn't just
+            # theoretical: with enough files sharing a shrunken pool, more
+            # than one can score confidently against the same entry, and
+            # the higher-scoring guess isn't reliably the correct one - so
+            # rather than trust a score comparison to pick a "winner",
+            # every entry claimed by more than one file here is rejected
+            # outright and left for manual review. A wrong rename is worse
+            # than no rename; an unresolved tie is a human's call, not a
+            # coin flip.
+            target_counts = Counter(target for _, _, target, _ in pass2_plans if target)
+            pass2_plans = [
+                (pdf_file, full_pdf_path, None,
+                 f"Skipped -> {target_counts[target]} files in this batch all matched "
+                 f"'{target}' - ambiguous, left for manual review")
+                if target and target_counts[target] > 1
+                else (pdf_file, full_pdf_path, target, match_method)
+                for pdf_file, full_pdf_path, target, match_method in pass2_plans
+            ]
+
+            # A pass-2 layer doesn't need another pass-2 file competing for
+            # the exact same guess to still be wrong - it can just as easily
+            # land on the name of a DIFFERENT file that isn't going
+            # anywhere this run (already correctly named, still unmatched
+            # after pass 1, or itself just rejected as ambiguous above).
+            # execute_renames' own collision handling would safely give
+            # that a "(2)" suffix rather than overwrite anything - but per
+            # the same reasoning as the check above, a pass-2 guess landing
+            # on an already-spoken-for name is itself the signal of a wrong
+            # guess, not a coincidence worth a numbered suffix.
+            # target_final_title never carries the '.pdf' extension (see
+            # safe_pdf_filename) - comparing it directly against pdf_file
+            # would silently never match even a genuine self-match, so
+            # every comparison below goes through safe_pdf_filename first.
+            stable_names = {
+                pdf_file for pdf_file, _, target, _ in pass1_plans
+                if not target or safe_pdf_filename(target) == pdf_file
+            }
+            stable_names.update(pdf_file for pdf_file, *_r in skip_plans)
+            stable_names.update(
+                pdf_file for pdf_file, _, target, _ in pass2_plans
+                if not target or safe_pdf_filename(target) == pdf_file
+            )
+            pass2_plans = [
+                (pdf_file, full_pdf_path, None,
+                 f"Skipped -> matches the current name of a different file staying in "
+                 f"place ('{target}') - ambiguous, left for manual review")
+                if target and safe_pdf_filename(target) != pdf_file and safe_pdf_filename(target) in stable_names
+                else (pdf_file, full_pdf_path, target, match_method)
+                for pdf_file, full_pdf_path, target, match_method in pass2_plans
+            ]
+
+            pass2_by_name = {p[0]: p for p in pass2_plans}
     except KeyboardInterrupt:
         # _run_parallel_scan has already torn down its pool by the time
         # this propagates, so there's nothing left running in the
         # background - this returns to the user immediately.
         print("\n\n⚠️  Cancelled during the scan - nothing was renamed.")
         return
+
+    scanned_plans = [pass2_by_name.get(plan[0], plan) if not plan[2] else plan for plan in pass1_plans]
+
+    # A skipped file's SHA256 came from the scan index, not this run's
+    # scan, but the results/scan-index bookkeeping below reads every
+    # file's hash from this same dict either way.
+    file_hashes.update({pdf_file: scan_index[pdf_file]["sha256"] for pdf_file, *_r in skip_plans})
+    plan_by_name = {p[0]: p for p in skip_plans + scanned_plans}
+    plans = [plan_by_name[pdf_file] for pdf_file in pdf_files]
 
     print(" " * 100, end="\r")  # clear the last progress line before real output starts
     print(f"Scan complete - identifying names for {total_files} PDFs.\n")
@@ -2210,6 +2505,38 @@ def run_matching_agent():
     if new_cache_entries:
         save_fingerprint_cache(CACHE_PATH, fingerprint_cache)
         print(f"Fingerprint cache updated: +{new_cache_entries} new entries ({len(fingerprint_cache)} total).")
+
+    # Keep the scan index (see load_scan_index) in sync with what actually
+    # ended up on disk, so the next run's incremental scan can trust it:
+    # confirmed matches get a fresh size/mtime/sha256 entry under their
+    # final name, a file that came back unmatched has its entry dropped
+    # (whatever confirmed it before no longer holds), and a renamed file's
+    # old name is dropped so a future unrelated file dropped under that
+    # same old name is never mistaken for it.
+    if renaming_in_place:
+        scan_index_changed = False
+        for pdf_file, match_method, new_filename, already_correct in results:
+            if new_filename is None:
+                if scan_index.pop(pdf_file, None) is not None:
+                    scan_index_changed = True
+                continue
+            if "(low confidence)" in match_method:
+                continue
+            file_sha256 = file_hashes.get(pdf_file)
+            if not file_sha256:
+                continue
+            try:
+                stat = os.stat(os.path.join(OUTPUT_DIRECTORY, new_filename))
+            except OSError:
+                continue
+            entry = {"size": stat.st_size, "mtime": stat.st_mtime, "sha256": file_sha256}
+            if scan_index.get(new_filename) != entry:
+                scan_index[new_filename] = entry
+                scan_index_changed = True
+            if new_filename != pdf_file and scan_index.pop(pdf_file, None) is not None:
+                scan_index_changed = True
+        if scan_index_changed:
+            save_scan_index(SCAN_INDEX_PATH, scan_index)
 
     print("\n==================================================")
     print(f"  Finished. Matched {matched_count} of {len(pdf_files)} PDFs.")
