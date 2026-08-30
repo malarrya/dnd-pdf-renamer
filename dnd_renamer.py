@@ -298,7 +298,11 @@ def prompt_for_path(label, kind, default=None):
 
     suffix = f"\n  [Enter = {default}]" if default else ""
     while True:
-        raw = input(f"{label}{suffix}\n> ")
+        try:
+            raw = input(f"{label}{suffix}\n> ")
+        except (EOFError, KeyboardInterrupt):
+            print("\nCancelled.")
+            sys.exit(1)
         value = _strip_quotes(raw)
         if not value:
             if default:
@@ -354,7 +358,11 @@ def configure_paths():
         print(f"  PDF folder         : {config['pdf_directory']}")
         print(f"  Image folder       : {config['image_directory']}")
         print(f"  Output folder      : {config['output_directory']}")
-        answer = input("Press Enter to continue, or type 'c' to change any of these: ").strip().lower()
+        try:
+            answer = input("Press Enter to continue, or type 'c' to change any of these: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\nCancelled.")
+            sys.exit(1)
         reconfigure = answer in ("c", "change")
 
     if reconfigure:
@@ -435,7 +443,7 @@ def clean_string(text):
     if not text:
         return ""
     text = text.replace('_', ' ').replace('-', ' ').replace('&', ' and ')
-    text = text.lower().replace(' _n_ ', ' and ').replace(' n ', ' and ')
+    text = text.lower().replace(' n ', ' and ')
     cleaned = "".join([c for c in text if c.isalnum() or c.isspace()])
     return " ".join(cleaned.split())
 
@@ -809,7 +817,10 @@ def resolve_display_name(xml_item, image_library):
         # identified. Break the tie using each candidate's own leading
         # product code against the winning item's.
         own_code = xml_item['clean_title'].split()[0] if xml_item['clean_title'] else ""
-        exact = [img for img in candidates if img['clean_name'].split()[0] == own_code]
+        exact = [
+            img for img in candidates
+            if img['clean_name'] and img['clean_name'].split()[0] == own_code
+        ]
         if exact:
             return exact[0]['original_name']
         return candidates[0]['original_name']
@@ -1636,6 +1647,11 @@ def execute_renames(plans, output_directory):
     results = []  # (pdf_file, match_method, final_filename_or_None, already_correct)
     move_list = []  # (pdf_file, temp_path, safe_title, match_method)
     pending_temp_moves = {}  # temp_path -> original_full_path, for rollback on cancel
+    pending_final = {}  # temp_path -> (pdf_file, match_method, new_filename), for the Phase 2
+                         # rename currently in flight - lets a KeyboardInterrupt landing right
+                         # after os.rename() succeeds but before this loop's own bookkeeping
+                         # still be counted as finished below, instead of vanishing from every
+                         # tally (the file itself is already safely at its final name either way)
     temp_counter = 0
 
     try:
@@ -1697,12 +1713,15 @@ def execute_renames(plans, output_directory):
                 new_filename = f"{safe_title} ({counter}).pdf"
                 new_path = os.path.join(output_directory, new_filename)
 
+            pending_final[temp_path] = (pdf_file, match_method, new_filename)
             try:
                 os.rename(temp_path, new_path)
-                del pending_temp_moves[temp_path]
                 reserved_names.add(new_filename)
                 results.append((pdf_file, match_method, new_filename, False))
+                del pending_temp_moves[temp_path]
+                del pending_final[temp_path]
             except Exception as e:
+                del pending_final[temp_path]
                 print(f"❌ Failed to rename '{pdf_file}' -> '{new_filename}': {e}")
                 results.append((pdf_file, f"{match_method} [FAILED]", None, False))
 
@@ -1715,6 +1734,15 @@ def execute_renames(plans, output_directory):
                 # attempted (see above) - if Ctrl+C landed before the move
                 # itself actually happened, the temp file was never created,
                 # so the original is still sitting right where it started.
+                # But if this was a Phase 2 (final-name) move, it may instead
+                # mean the rename to its final name already succeeded and only
+                # this loop's own results/reserved_names bookkeeping got cut
+                # off - count it as finished rather than losing track of it.
+                final = pending_final.get(temp_path)
+                if final:
+                    pdf_file, match_method, new_filename = final
+                    reserved_names.add(new_filename)
+                    results.append((pdf_file, match_method, new_filename, False))
                 continue
             try:
                 os.rename(temp_path, original_path)
@@ -1870,10 +1898,18 @@ def review_unmatched_interactively(unmatched, output_directory, fingerprint_cach
     )
     guesses = {}  # pdf_file -> (full_pdf_path, guess_or_None)
     try:
-        futures = [executor.submit(_guess_worker, pdf_file, full_pdf_path) for pdf_file, full_pdf_path in unmatched]
+        futures = {
+            executor.submit(_guess_worker, pdf_file, full_pdf_path): (pdf_file, full_pdf_path)
+            for pdf_file, full_pdf_path in unmatched
+        }
         completed = 0
         for future in concurrent.futures.as_completed(futures):
-            pdf_file, full_pdf_path, guess = future.result()
+            pdf_file, full_pdf_path = futures[future]
+            try:
+                _, _, guess = future.result()
+            except Exception as e:
+                guess = None
+                print(f"\n⚠️  Couldn't compute a suggestion for '{pdf_file}': {e}")
             guesses[pdf_file] = (full_pdf_path, guess)
             completed += 1
             print(f"  Computed ({completed}/{len(unmatched)}): {pdf_file}".ljust(100), end="\r", flush=True)
