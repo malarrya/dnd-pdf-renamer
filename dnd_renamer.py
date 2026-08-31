@@ -1985,13 +1985,16 @@ def _scan_worker_pass1(pdf_file, full_pdf_path):
     )
 
 
-def _init_scan_worker_pass2(xml_path, image_dir, cache_path, unclaimed_xml_items):
+def _init_scan_worker_pass2(xml_path, image_dir, cache_path, unclaimed_xml_items, cover_hash_index):
     """Like _init_scan_worker_pass1, but for pass-2 workers: takes
     unclaimed_xml_items as computed by the caller from pass 1's actual,
     whole-batch results (see identify_file_pass1 and run_matching_agent)
-    instead of guessing it from on-disk filenames itself. fingerprint_cache
-    isn't loaded here - every file reaching pass 2 already missed it in
-    pass 1, and nothing in pass 2 checks it again."""
+    instead of guessing it from on-disk filenames itself. cover_hash_index
+    is likewise built once by the caller (see build_cover_hash_index) and
+    handed to every worker rather than each one re-hashing the whole
+    LaunchBox image set itself. fingerprint_cache isn't loaded here -
+    every file reaching pass 2 already missed it in pass 1, and nothing
+    in pass 2 checks it again."""
     _ignore_sigint()
     xml_items = load_launchbox_db(xml_path)
     mark_generic_placeholders_with_siblings(xml_items)
@@ -1999,6 +2002,7 @@ def _init_scan_worker_pass2(xml_path, image_dir, cache_path, unclaimed_xml_items
     _worker_context['image_library'] = load_image_library(image_dir)
     _worker_context['idf_table'] = build_idf_table(xml_items)
     _worker_context['unclaimed_xml_items'] = unclaimed_xml_items
+    _worker_context['cover_hash_index'] = cover_hash_index
 
 
 def _scan_worker_pass2(pdf_file, full_pdf_path, file_sha256):
@@ -2009,7 +2013,7 @@ def _scan_worker_pass2(pdf_file, full_pdf_path, file_sha256):
     return identify_file_pass2(
         pdf_file, full_pdf_path, file_sha256,
         ctx['xml_items'], ctx['image_library'], ctx['idf_table'],
-        ctx['unclaimed_xml_items'],
+        ctx['unclaimed_xml_items'], ctx['cover_hash_index'],
     )
 
 
@@ -2024,6 +2028,67 @@ def _guess_worker(pdf_file, full_pdf_path):
     ctx = _worker_context
     guess = best_guess_for_unmatched(full_pdf_path, ctx['xml_items'], ctx['image_library'], ctx['idf_table'])
     return pdf_file, full_pdf_path, guess
+
+
+def _drop_low_confidence_tag(match_method):
+    """Strips the '(low confidence)' marker (and its ', low confidence'
+    form when it shares a parenthetical with other detail, e.g. a page
+    count) from a match_method string - used only once a human has
+    confirmed the match, so the caching/scan-index logic downstream (which
+    keys off this exact substring's absence) treats it like any other
+    trusted match."""
+    cleaned = re.sub(r', low confidence(?=\))', '', match_method)
+    cleaned = re.sub(r'\s*\(low confidence\)', '', cleaned)
+    return cleaned.strip()
+
+
+def review_low_confidence_matches(results):
+    """Post-scan step: for every file this run renamed based on a low-
+    confidence layer (identify_file_pass2's legacy filename/substring
+    matching - the last-resort layers, tagged "(low confidence)" in their
+    match_method), offers to confirm each one by hand. Those matches are
+    deliberately excluded from the fingerprint cache and scan index while
+    unconfirmed (see identify_file_pass1's caching-exclusion note) -
+    caching an unverified guess would make it permanent for every future
+    encounter of the identical file. A human confirming one is a stronger
+    signal than any automated layer, so a confirmed entry has its
+    match_method rewritten to drop the "(low confidence)" tag, which lets
+    it flow into the exact same caching/scan-index logic a high-confidence
+    automated match already gets, further down in run_matching_agent.
+    Returns a new results list with confirmed entries updated in place;
+    unconfirmed/declined ones are returned unchanged."""
+    candidates = [
+        i for i, (pdf_file, match_method, new_filename, already_correct) in enumerate(results)
+        if new_filename and "(low confidence)" in match_method
+    ]
+    if not candidates:
+        return results
+
+    print(f"\n{len(candidates)} file(s) this run were renamed based on a low-confidence guess.")
+    try:
+        answer = input("Review and confirm which are correct, so they're trusted next time? [y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("\nSkipping review.")
+        return results
+    if answer not in ("y", "yes"):
+        return results
+
+    results = list(results)
+    confirmed = 0
+    for i in candidates:
+        pdf_file, match_method, new_filename, already_correct = results[i]
+        try:
+            answer = input(f"'{pdf_file}' -> '{new_filename}'  [{match_method}]  Correct? [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\nStopping review - anything already confirmed stays trusted.")
+            break
+        if answer in ("y", "yes"):
+            results[i] = (pdf_file, f"Human-Confirmed ({_drop_low_confidence_tag(match_method)})", new_filename, already_correct)
+            confirmed += 1
+
+    if confirmed:
+        print(f"\nConfirmed {confirmed} match(es) - they'll be cached and trusted next time.")
+    return results
 
 
 def review_unmatched_interactively(unmatched, output_directory, fingerprint_cache):
@@ -2251,17 +2316,6 @@ def run_matching_agent():
     mark_generic_placeholders_with_siblings(xml_items)
     idf_table = build_idf_table(xml_items)
     fingerprint_cache = load_fingerprint_cache(CACHE_PATH)
-    # Cover-image perceptual hashing (build_cover_hash_index/cover_image_match,
-    # defined above) was built and calibrated against 80 confirmed-correct
-    # files and deliberately left disabled here: true-match distances
-    # ranged 2-148 and false-candidate distances ranged 4-106 - heavily
-    # overlapping, with real cases (e.g. Monster Manual) where an unrelated
-    # cover scored a better distance than the correct one. No threshold
-    # separates them safely, and it wasn't even faster than OCR (network/
-    # decode cost dominates, not text recognition). Kept in the code as a
-    # validated dead end rather than wired in - see identify_file_pass2's
-    # Layer 2A, which is a no-op whenever cover_hash_index is falsy.
-    cover_hash_index = None
 
     print(f"Loaded {len(image_library)} Image names and {len(xml_items)} XML entries.")
     if fingerprint_cache:
@@ -2368,12 +2422,17 @@ def run_matching_agent():
         if still_unresolved:
             print(" " * 100, end="\r")
             print(f"Pass 1 complete. Running deeper identification (process of elimination, "
-                  f"OCR) on {len(still_unresolved)} still-unmatched file(s)...\n")
+                  f"cover art, OCR) on {len(still_unresolved)} still-unmatched file(s)...\n")
+            # Built once here (not per worker) and only when pass 2 is
+            # actually needed - every LaunchBox box-art image lives on the
+            # local drive, so this costs a few seconds regardless of how
+            # many PDFs are being scanned, not per-file network time.
+            cover_hash_index = build_cover_hash_index(image_library)
             pass2_plans, pass2_hashes, _ = _run_parallel_scan(
                 still_unresolved,
                 dispatch=lambda ex, f, p: ex.submit(_scan_worker_pass2, f, p, file_hashes[f]),
                 init_fn=_init_scan_worker_pass2,
-                init_args=(XML_PATH, IMAGE_DIRECTORY, CACHE_PATH, unclaimed_xml_items),
+                init_args=(XML_PATH, IMAGE_DIRECTORY, CACHE_PATH, unclaimed_xml_items, cover_hash_index),
                 progress_verb="Deeper scan",
             )
             file_hashes.update(pass2_hashes)
@@ -2483,6 +2542,8 @@ def run_matching_agent():
         else:
             print(f"✅ [{match_method}]\n   '{pdf_file}'  ->  '{new_filename}'")
             matched_count += 1
+
+    results = review_low_confidence_matches(results)
 
     # Seed the fingerprint cache from every match just confirmed by a
     # high-confidence method, so an identical copy of this same file -
