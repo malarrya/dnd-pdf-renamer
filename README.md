@@ -14,10 +14,12 @@ Each file goes through a cascade of identification layers, roughly cheapest/most
 
 1. **Fingerprint cache** — if this exact file's content (SHA256) has been seen before, reuse the known answer instantly.
 2. **Content-based matching** — extracts native PDF text and scores it against every catalog entry's description, page count, and file size. High score/margin thresholds required to accept a match.
-3. **OCR fallback** — for scanned PDFs with no text layer, OCRs the front pages and back cover and compares against the catalog the same way.
-4. **Cover-image matching** — perceptual-hash comparison against the catalog's box-art images, for scans OCR can't read at all.
-5. **Process of elimination** — once most files are matched, whatever catalog entries are left unclaimed become a much smaller, less noisy pool to check remaining files against.
+3. **Process of elimination** — for files nothing above resolved, checks them only against catalog entries nothing else has already claimed — a much smaller, less noisy pool.
+4. **Cover-image matching** — perceptual-hash comparison against the catalog's box-art images, tried before OCR since it's far cheaper and can succeed on scans OCR can't read at all.
+5. **OCR fallback** — for scanned PDFs with no text layer, OCRs the front pages and back cover and compares against the catalog the same way as step 2.
 6. **Legacy filename matching** — last resort only, using whatever the file happens to already be named.
+
+Steps 1–2 run for every file first; only files nothing above resolves move on to steps 3–6, so most of a run's time is spent on a minority of hard cases.
 
 Every layer is filename-independent except the last, specifically so a badly-misnamed file can still be identified from its actual content, and so a wrong rename never gets "confirmed" as correct on a later run just because it inherited a bad name.
 
@@ -61,6 +63,14 @@ python dnd_renamer.py
 The script scans your PDF folder in parallel, reports how many files it confidently matched, and offers to walk you through best-guess suggestions for anything left unmatched. Nothing is renamed without either a confident automated match or your explicit confirmation.
 
 If you're renaming in place (output folder same as PDF folder) and a previous run already confirmed some files, you'll be asked whether to do a **full** scan (re-verify every file's content from scratch) or an **incremental** one (skip any file whose size and modified time haven't changed since it was last confirmed, and only scan what's new or changed). Incremental scans avoid the full-file read needed to re-verify each PDF, which matters most when the PDF folder is on a network share.
+
+## Sharing the fingerprint cache
+
+The fingerprint cache (`dnd_renamer_cache.json`, next to the script) maps a file's SHA256 content hash to its confirmed title — nothing else. It's keyed purely on content, not filename or path, so it works just as well for identifying someone else's copy of a book as your own: classic TSR/D&D PDFs mostly trace back to a handful of original scans that circulate widely, so two collectors' copies of the same book are very often byte-for-byte identical.
+
+That means a cache built up from one person's collection can give someone else's *first* run a head start: any of their PDFs that happen to be byte-identical to a file already confirmed here get resolved instantly, skipping content analysis and OCR entirely. It carries no PDF content and nothing copyright-sensitive — just hashes, confirmed titles, and which method confirmed them.
+
+`dnd_renamer_cache.example.json` is a snapshot of one such cache for the D&D Classic Editions catalog. To use it, copy it to `dnd_renamer_cache.json` next to your own copy of the script before your first run. It won't help with files that aren't byte-identical to something already in it — those still go through the normal identification pipeline like any new file.
 
 ## Beyond D&D Classic Editions
 
