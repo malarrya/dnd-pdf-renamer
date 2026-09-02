@@ -26,13 +26,18 @@ Every layer is filename-independent except the last, specifically so a badly-mis
 ## Installing on Windows without Python
 
 If you don't already have Python and just want to run the tool, use the
-Windows installer instead of the steps below: grab `DnD_Renamer_Setup.exe`
+Windows installer instead of the steps below: download the latest
+`DnD_Renamer_Setup.exe` from the
+[Releases page](https://github.com/malarrya/dnd-pdf-renamer/releases/latest)
 (see `installer/BUILD.md` for how it's built), run it, and optionally leave
 the "Install Tesseract OCR" box checked so scanned-PDF support works out of
 the box. It installs a self-contained `dnd_renamer.exe` with every required
 Python package already bundled in, plus Start Menu/Desktop shortcuts - no
 `pip install` needed. Everything below still applies to how the tool behaves
 once it's running; skip straight to [Setup](#setup).
+
+Unsigned build: Windows SmartScreen may warn on first run ("Windows
+protected your PC") - click **More info** -> **Run anyway**.
 
 ## Requirements
 
