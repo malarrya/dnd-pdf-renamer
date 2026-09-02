@@ -4,3 +4,10 @@ dnd_renamer_cache.json
 dnd_renamer_config.json
 dnd_renamer_scan_index.json
 *.bak
+
+# Packaging build output (see installer/BUILD.md to regenerate)
+build_venv/
+build/
+dist/
+*.spec
+installer/output/

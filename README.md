@@ -23,7 +23,21 @@ Steps 1–2 run for every file first; only files nothing above resolves move on 
 
 Every layer is filename-independent except the last, specifically so a badly-misnamed file can still be identified from its actual content, and so a wrong rename never gets "confirmed" as correct on a later run just because it inherited a bad name.
 
+## Installing on Windows without Python
+
+If you don't already have Python and just want to run the tool, use the
+Windows installer instead of the steps below: grab `DnD_Renamer_Setup.exe`
+(see `installer/BUILD.md` for how it's built), run it, and optionally leave
+the "Install Tesseract OCR" box checked so scanned-PDF support works out of
+the box. It installs a self-contained `dnd_renamer.exe` with every required
+Python package already bundled in, plus Start Menu/Desktop shortcuts - no
+`pip install` needed. Everything below still applies to how the tool behaves
+once it's running; skip straight to [Setup](#setup).
+
 ## Requirements
+
+*(Only relevant if you're running the script directly with Python, rather
+than the Windows installer above.)*
 
 - Python 3.9+
 - [`pypdf`](https://pypi.org/project/pypdf/) (required)

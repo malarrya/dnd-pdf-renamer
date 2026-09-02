@@ -80,7 +80,14 @@ def _offer_pip_install(package_names):
     Returns True only if the install command itself succeeded - the
     caller still has to re-import to confirm the package is actually
     usable now (a stale/broken environment can make pip succeed without
-    the import actually working)."""
+    the import actually working). In a frozen (PyInstaller) build there's
+    no bundled pip and sys.executable is this exe, not a Python
+    interpreter, so re-launching it with `-m pip install ...` would just
+    relaunch the app itself - refuse instead of doing that."""
+    if getattr(sys, "frozen", False):
+        print("  This packaged build should already include every required package.")
+        print("  If you're seeing this, please report it as a bug.")
+        return False
     try:
         answer = input(f"  Install now via pip ({' '.join(package_names)})? [Y/n]: ").strip().lower()
     except (EOFError, KeyboardInterrupt):
@@ -263,16 +270,22 @@ PDF_DIRECTORY = None
 IMAGE_DIRECTORY = None
 OUTPUT_DIRECTORY = None  # Safe to keep identical to PDF_DIRECTORY
 
-CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dnd_renamer_config.json")
+# When frozen into a PyInstaller onefile exe, __file__ resolves inside the
+# temporary _MEIxxxx extraction dir (wiped after every run), not next to the
+# exe - so config/cache would silently reset on every launch. sys.executable
+# is the exe's real, persistent location in that case.
+_APP_DIR = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
+
+CONFIG_PATH = os.path.join(_APP_DIR, "dnd_renamer_config.json")
 
 # Not user-configurable - always lives next to the script, same as
 # CONFIG_PATH, so it travels with a distributed copy automatically.
-CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dnd_renamer_cache.json")
+CACHE_PATH = os.path.join(_APP_DIR, "dnd_renamer_cache.json")
 
 # Same idea as CACHE_PATH, but keyed by filename instead of content hash -
 # see load_scan_index for why a separate index is needed for incremental
 # scans.
-SCAN_INDEX_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dnd_renamer_scan_index.json")
+SCAN_INDEX_PATH = os.path.join(_APP_DIR, "dnd_renamer_scan_index.json")
 
 
 def _strip_quotes(raw):
@@ -2617,6 +2630,27 @@ def run_matching_agent():
 
 
 if __name__ == "__main__":
-    check_dependencies()
-    configure_paths()
-    run_matching_agent()
+    # A double-clicked frozen exe's console window closes the instant the
+    # process exits - on a normal finish that hides the final summary, and
+    # on a crash it hides the traceback entirely. Pausing for a keypress
+    # only in that case (never for a plain `python dnd_renamer.py` run,
+    # where the terminal itself stays open) fixes both without changing
+    # anything for the existing script-based workflow.
+    try:
+        check_dependencies()
+        configure_paths()
+        run_matching_agent()
+    except SystemExit:
+        raise
+    except KeyboardInterrupt:
+        print("\nCancelled.")
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        print("\nSomething went wrong (see error above). Please report this as a bug.")
+    finally:
+        if getattr(sys, "frozen", False):
+            try:
+                input("\nPress Enter to exit...")
+            except (EOFError, KeyboardInterrupt):
+                pass
