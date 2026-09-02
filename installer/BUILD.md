@@ -11,13 +11,16 @@ From the repo root, in a fresh virtual environment:
 ```
 python -m venv build_venv
 build_venv\Scripts\pip install pyinstaller pypdf pytesseract Pillow imagehash
-build_venv\Scripts\python -m PyInstaller --onefile --console --name dnd_renamer --clean dnd_renamer.py
+build_venv\Scripts\python -m PyInstaller --onefile --console --name dnd_renamer --icon installer\icon.ico --clean dnd_renamer.py
 ```
 
 This produces `dist\dnd_renamer.exe`, a single file with pypdf, pytesseract,
 Pillow, and imagehash all bundled in - end users don't need any of them
 installed separately. (Tesseract OCR itself is a native engine, not a Python
-package, and can't be bundled this way - see step 2.)
+package, and can't be bundled this way - see step 2.) `--icon` bakes
+`installer/icon.ico` (a placeholder d20 glyph) into the exe itself, which is
+also what Explorer, the taskbar, and the Start Menu/Desktop shortcuts show -
+swap that file for real artwork whenever it's available and rebuild.
 
 ## 2. Build the installer
 
