@@ -39,6 +39,13 @@ once it's running; skip straight to [Setup](#setup).
 Unsigned build: Windows SmartScreen may warn on first run ("Windows
 protected your PC") - click **More info** -> **Run anyway**.
 
+If you installed v1.0.0 and hit an infinite "Press Enter to continue" loop
+that kept re-spawning itself, update to v1.0.1 or later - that version was
+missing `multiprocessing.freeze_support()`, so a worker process would fail
+to recognize itself as a worker, re-run the whole program from the top, and
+spawn its own worker pool on top of that, compounding until the machine
+bogged down.
+
 ## Requirements
 
 *(Only relevant if you're running the script directly with Python, rather
