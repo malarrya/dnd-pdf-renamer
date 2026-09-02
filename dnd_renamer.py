@@ -6,6 +6,7 @@ import io
 import json
 import logging
 import math
+import multiprocessing
 import os
 import re
 import shutil
@@ -2630,6 +2631,17 @@ def run_matching_agent():
 
 
 if __name__ == "__main__":
+    # Required for ProcessPoolExecutor to work at all in a frozen (PyInstaller)
+    # exe on Windows: a spawned worker re-launches this same exe with an
+    # internal marker telling it "you're a worker, run one task and exit."
+    # freeze_support() is what makes the exe recognize that marker - without
+    # it, every "worker" just doesn't see it, treats the relaunch as a normal
+    # start, and reruns this entire script from the top: re-prompting for
+    # config, then spawning its own pool of workers that do the same thing
+    # again, compounding with every worker spawned. A no-op when not frozen
+    # or not on Windows, so this is always safe to call.
+    multiprocessing.freeze_support()
+
     # A double-clicked frozen exe's console window closes the instant the
     # process exits - on a normal finish that hides the final summary, and
     # on a crash it hides the traceback entirely. Pausing for a keypress
