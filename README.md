@@ -58,6 +58,12 @@ process running in the background if an earlier exception skipped its
 worker pool's clean shutdown; Close now always terminates any that are
 still running.
 
+[**v1.1.3**](https://github.com/malarrya/dnd-pdf-renamer/releases/tag/v1.1.3)
+is a small efficiency fix: confirming a match through the "couldn't be
+confidently matched" review now also updates the incremental-scan
+index, not just the fingerprint cache, so a future in-place scan can
+skip re-reading that file too.
+
 If you installed v1.0.0 and hit an infinite "Press Enter to continue" loop
 that kept re-spawning itself, update to v1.0.1 or later - that version was
 missing `multiprocessing.freeze_support()`, so a worker process would fail
