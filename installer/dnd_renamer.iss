@@ -1,13 +1,13 @@
 ; Inno Setup script for D&D Renamer.
 ;
-; Build with (from repo root, after `pyinstaller --onefile --console --name
+; Build with (from repo root, after `pyinstaller --onefile --windowed --name
 ; dnd_renamer --icon installer\icon.ico dnd_renamer.py` has produced
 ; dist\dnd_renamer.exe):
 ;   "C:\Users\<you>\AppData\Local\Programs\Inno Setup 7\ISCC.exe" installer\dnd_renamer.iss
 ; Output lands in installer\output\DnD_Renamer_Setup.exe.
 
 #define MyAppName "D&D Renamer"
-#define MyAppVersion "1.1.0"
+#define MyAppVersion "1.1.1"
 #define MyAppExeName "dnd_renamer.exe"
 
 [Setup]
@@ -28,10 +28,7 @@ WizardStyle=modern
 DisableProgramGroupPage=yes
 ; SetupIconFile only affects the installer/uninstaller icon, not the
 ; launched app's window (that comes from the icon baked into
-; dnd_renamer.exe itself - see BUILD.md's --icon flag). The exe still
-; opens a console window alongside its GUI (built with --console, not
-; --windowed - see BUILD.md); that console mirrors the same log text
-; the GUI's own log pane shows.
+; dnd_renamer.exe itself - see BUILD.md's --icon flag).
 SetupIconFile=icon.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 

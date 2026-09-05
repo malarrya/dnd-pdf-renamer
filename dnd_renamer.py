@@ -16,6 +16,22 @@ import threading
 import time
 import xml.etree.ElementTree as ET
 
+# A --windowed (GUI-subsystem, no console) frozen build has no real stdio
+# at all - sys.stdout/stderr/stdin are None, not just closed - so any bare
+# print()/input() call anywhere (dependency checks before the GUI takes
+# over, a worker subprocess inheriting the same windowed subsystem, the
+# console-fallback path if tkinter is ever missing, etc.) would crash with
+# AttributeError before any window has a chance to appear. Swapping in
+# harmless no-op streams here, once, keeps every existing call site safe
+# without auditing each one - a no-op for a normal console/script run,
+# where these are never None to begin with.
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w")
+if sys.stdin is None:
+    sys.stdin = open(os.devnull, "r")
+
 # --- REQUIRED: PDF READING ---
 # Unlike the OCR/cover-hash fallbacks below, nothing in this script can run
 # at all without this - so a missing pypdf isn't allowed to degrade

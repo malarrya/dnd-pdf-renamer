@@ -11,7 +11,7 @@ From the repo root, in a fresh virtual environment:
 ```
 python -m venv build_venv
 build_venv\Scripts\pip install pyinstaller pypdf pytesseract Pillow imagehash
-build_venv\Scripts\python -m PyInstaller --onefile --console --name dnd_renamer --icon installer\icon.ico --clean dnd_renamer.py
+build_venv\Scripts\python -m PyInstaller --onefile --windowed --name dnd_renamer --icon installer\icon.ico --clean dnd_renamer.py
 ```
 
 This produces `dist\dnd_renamer.exe`, a single file with pypdf, pytesseract,
@@ -21,6 +21,16 @@ package, and can't be bundled this way - see step 2.) `--icon` bakes
 `installer/icon.ico` (a placeholder d20 glyph) into the exe itself, which is
 also what Explorer, the taskbar, and the Start Menu/Desktop shortcuts show -
 swap that file for real artwork whenever it's available and rebuild.
+
+`--windowed` (rather than `--console`) suppresses the separate console
+window a plain PyInstaller build would otherwise pop up alongside the
+GUI - it duplicated the exact same text the GUI's own log pane already
+shows, which was just confusing. The app's `sys.stdout`/`stderr`/`stdin`
+are `None` under `--windowed`, not just closed, so `dnd_renamer.py`
+swaps in no-op streams for those right at import time - see the
+comment above `PYPDF_AVAILABLE` near the top of the file - before
+anything has a chance to print() or input() and crash with no console
+to show the error in.
 
 ## 2. Build the installer
 
