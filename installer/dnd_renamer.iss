@@ -7,7 +7,7 @@
 ; Output lands in installer\output\DnD_Renamer_Setup.exe.
 
 #define MyAppName "D&D Renamer"
-#define MyAppVersion "1.1.1"
+#define MyAppVersion "1.1.2"
 #define MyAppExeName "dnd_renamer.exe"
 
 [Setup]
