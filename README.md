@@ -51,6 +51,13 @@ or later - that version still popped up a separate console window
 alongside the GUI, mirroring the exact same log text the GUI's own log
 pane already showed.
 
+If you installed v1.1.1, update to
+[**v1.1.2**](https://github.com/malarrya/dnd-pdf-renamer/releases/tag/v1.1.2)
+or later - clicking **Close** in that version could leave a scan worker
+process running in the background if an earlier exception skipped its
+worker pool's clean shutdown; Close now always terminates any that are
+still running.
+
 If you installed v1.0.0 and hit an infinite "Press Enter to continue" loop
 that kept re-spawning itself, update to v1.0.1 or later - that version was
 missing `multiprocessing.freeze_support()`, so a worker process would fail
