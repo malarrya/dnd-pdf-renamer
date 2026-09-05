@@ -45,6 +45,12 @@ the four folder/file paths, and a run window with live progress, a
 scrolling log, and working **Pause**/**Cancel** buttons. See
 [Setup](#setup) and [Usage](#usage) below for what that looks like.
 
+If you installed v1.1.0, update to
+[**v1.1.1**](https://github.com/malarrya/dnd-pdf-renamer/releases/tag/v1.1.1)
+or later - that version still popped up a separate console window
+alongside the GUI, mirroring the exact same log text the GUI's own log
+pane already showed.
+
 If you installed v1.0.0 and hit an infinite "Press Enter to continue" loop
 that kept re-spawning itself, update to v1.0.1 or later - that version was
 missing `multiprocessing.freeze_support()`, so a worker process would fail
