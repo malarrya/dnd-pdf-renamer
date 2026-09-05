@@ -5,6 +5,7 @@ Imported lazily (inside a function, not at module scope) by
 dnd_renamer.py, so a Python build without tkinter falls back to that
 module's console-only behavior instead of failing outright.
 """
+import multiprocessing
 import os
 import queue
 import re
@@ -441,6 +442,35 @@ def _show_confirm_dialog(root, request):
     return result["decision"]
 
 
+def _force_close(dnd_renamer, root):
+    """Guarantees the whole application actually exits when Close is
+    clicked or the window's X is pressed - not just this window. A
+    ProcessPoolExecutor that doesn't get a clean .shutdown() call on
+    some exception path (this has happened - see git history on
+    orphaned worker processes) leaves its manager thread running as a
+    non-daemon thread, which silently keeps the whole process alive
+    even after every window is gone and nothing is visibly happening;
+    a worker process it already spawned is a separate OS process
+    entirely, unaffected by anything happening in this one. Explicitly
+    terminating both here removes any dependence on every executor
+    call site's cleanup being airtight, rather than trying to audit
+    each one. os._exit() (not sys.exit()) is deliberate - it forces an
+    immediate stop with no cleanup handlers or thread joins, which is
+    exactly what's needed here."""
+    try:
+        dnd_renamer.CANCEL_EVENT.set()
+        for child in multiprocessing.active_children():
+            try:
+                child.terminate()
+            except Exception:
+                pass
+        root.destroy()
+    except Exception:
+        pass
+    finally:
+        os._exit(0)
+
+
 def run_scan_window(run_fn, dnd_renamer):
     """Opens a window with a progress bar and a scrolling log mirroring
     stdout/stderr while run_fn() runs on a background thread (tkinter
@@ -569,7 +599,7 @@ def run_scan_window(run_fn, dnd_renamer):
     cancel_button = ttk.Button(button_row, text="Cancel", command=lambda: dnd_renamer.CANCEL_EVENT.set())
     cancel_button.pack(side="left", padx=(8, 0))
     ttk.Button(button_row, text="View Full Log", command=view_full_log).pack(side="left", padx=(8, 0))
-    close_button = ttk.Button(button_row, text="Close", state="disabled", command=root.destroy)
+    close_button = ttk.Button(button_row, text="Close", state="disabled", command=lambda: _force_close(dnd_renamer, root))
     close_button.pack(side="right")
 
     pause_note = f"Note: Pause stops new files immediately, but up to {dnd_renamer.SCAN_WORKERS} already in progress will finish first."
@@ -690,7 +720,7 @@ def run_scan_window(run_fn, dnd_renamer):
 
     def on_close():
         if run_state["done"]:
-            root.destroy()
+            _force_close(dnd_renamer, root)
         # Ignore the close button/X while the scan is still running -
         # closing the window can't stop the background thread, so
         # letting it through would orphan the scan instead of cancelling
