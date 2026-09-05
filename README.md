@@ -39,6 +39,12 @@ once it's running; skip straight to [Setup](#setup).
 Unsigned build: Windows SmartScreen may warn on first run ("Windows
 protected your PC") - click **More info** -> **Run anyway**.
 
+[**v1.1.0**](https://github.com/malarrya/dnd-pdf-renamer/releases/tag/v1.1.0)
+adds a full GUI in place of the old console prompts - a setup window for
+the four folder/file paths, and a run window with live progress, a
+scrolling log, and working **Pause**/**Cancel** buttons. See
+[Setup](#setup) and [Usage](#usage) below for what that looks like.
+
 If you installed v1.0.0 and hit an infinite "Press Enter to continue" loop
 that kept re-spawning itself, update to v1.0.1 or later - that version was
 missing `multiprocessing.freeze_support()`, so a worker process would fail
