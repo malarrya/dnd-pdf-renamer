@@ -385,9 +385,10 @@ def _show_confirm_dialog(root, request):
     main.pack(fill="both")
 
     info = (
-        f"{request['pdf_file']}\n"
-        f"→  {request['safe_title']}.pdf\n"
-        f"{request['detail']}"
+        f"Currently named:  {request['pdf_file']}\n"
+        f"Suggested identity:  {request['safe_title']}.pdf\n"
+        f"{request['detail']}\n\n"
+        f"Do the two images below show the same book?"
     )
     ttk.Label(main, text=info, justify="left").pack(anchor="w", pady=(0, 8))
 
@@ -422,8 +423,8 @@ def _show_confirm_dialog(root, request):
         )
         placeholder.pack(ipady=THUMB_SIZE[1] // 2 - 15)
 
-    add_thumb(None, request["box_art_path"], "Catalog box art")
-    add_thumb(request["preview_image"], None, "PDF front page")
+    add_thumb(None, request["box_art_path"], "Suggested match\n(catalog box art)")
+    add_thumb(request["preview_image"], None, "This file's own\nfront page")
 
     def choose(decision):
         result["decision"] = decision
