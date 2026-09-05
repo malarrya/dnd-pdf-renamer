@@ -72,13 +72,15 @@ You'll need a LaunchBox platform with:
 - An XML database file (`Data/Platforms/YourPlatform.xml`) listing each title, its notes/description, and its intended filename (`ApplicationPath`)
 - A folder of box-art images matching those titles
 
-On first run, the script will prompt you for:
+On first run, a setup window opens asking for:
 1. The path to your LaunchBox platform XML file
 2. The folder containing your PDFs
 3. The folder containing the box-art images
 4. Where renamed files should go (can be the same as your PDF folder, to rename in place)
 
-Your answers are saved to `dnd_renamer_config.json` next to the script, so you won't be asked again on future runs unless a saved path goes stale. See `dnd_renamer_config.example.json` for the expected format if you'd rather set it up by hand.
+Each field has a **Browse...** button to navigate to the folder/file instead of typing the path by hand. (If tkinter isn't available in your Python install, the same four questions are asked as console prompts instead.)
+
+Your answers are saved to `dnd_renamer_config.json` next to the script, so you won't be asked again on future runs - you'll just see a summary of the saved paths with the option to change them. See `dnd_renamer_config.example.json` for the expected format if you'd rather set it up by hand.
 
 ## Usage
 
@@ -86,7 +88,7 @@ Your answers are saved to `dnd_renamer_config.json` next to the script, so you w
 python dnd_renamer.py
 ```
 
-The script scans your PDF folder in parallel, reports how many files it confidently matched, and offers to walk you through best-guess suggestions for anything left unmatched. Nothing is renamed without either a confident automated match or your explicit confirmation.
+The scan itself runs in a window showing a progress bar and a scrolling log of everything happening (the same messages you'd otherwise only see in the console), with **Pause** (lets any files already in progress finish, then holds before starting more) and **Cancel** buttons that work at the same safe points a console Ctrl+C always could. Once the scan finishes, it asks - in the same window - whether to review anything left unmatched or renamed on a low-confidence guess; reviewing one shows the catalog's box-art image side by side with a preview of the PDF's own front page, so you can visually confirm or reject the suggestion instead of judging on the filename alone. Nothing is renamed without either a confident automated match or your explicit confirmation.
 
 If you're renaming in place (output folder same as PDF folder) and a previous run already confirmed some files, you'll be asked whether to do a **full** scan (re-verify every file's content from scratch) or an **incremental** one (skip any file whose size and modified time haven't changed since it was last confirmed, and only scan what's new or changed). Incremental scans avoid the full-file read needed to re-verify each PDF, which matters most when the PDF folder is on a network share.
 

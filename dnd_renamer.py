@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import xml.etree.ElementTree as ET
 
@@ -288,6 +289,119 @@ CACHE_PATH = os.path.join(_APP_DIR, "dnd_renamer_cache.json")
 # scans.
 SCAN_INDEX_PATH = os.path.join(_APP_DIR, "dnd_renamer_scan_index.json")
 
+# Optional hooks consumed by a GUI (see dnd_renamer_gui.py's
+# run_scan_window). PROGRESS_HOOK, if set, is called as (phase: str,
+# completed: int, total: int) at each scan/rename/suggestion progress
+# step - total == 0 means "indeterminate" (no meaningful count yet).
+# CANCEL_EVENT lets a GUI's Cancel button (or a SIGINT handler bridged
+# from the console - real Ctrl+C can't reach a background thread
+# directly, since SIGINT is only ever delivered to the main thread)
+# request cancellation of a scan running off the main thread.
+# PAUSE_EVENT lets a GUI's Pause button hold the scan at its next
+# checkpoint without cancelling it. Dispatching new work stops
+# immediately; the worker processes already in flight (up to
+# SCAN_WORKERS of them) still run to completion in the background -
+# actually freezing them via Windows' process/thread suspend APIs
+# (NtSuspendProcess, and separately SuspendThread on each of a worker's
+# threads) was tried and reproducibly confirmed NOT to work in at least
+# one real environment this was tested in: both report success (a valid
+# handle, STATUS_SUCCESS) while the target process keeps running
+# completely unaffected, verified with a counter file the "suspended"
+# process kept incrementing on schedule throughout. That's consistent
+# with this being a virtualized/remote-session Windows install - the
+# same kind of environment behind several other display/rendering
+# oddities found in this app - not something fixable from here. The
+# achievable version is what's implemented: new dispatches stop
+# immediately, so a pause never grows past whatever's already in flight.
+# _check_control() re-raises cancellation as KeyboardInterrupt so it's
+# caught by the exact same cleanup paths a console Ctrl+C already goes
+# through. A plain console run never sets either event, so both are
+# always a no-op there.
+# CONFIRM_HOOK, if set, replaces the console y/n prompt in
+# review_unmatched_interactively with a GUI comparison dialog (box art
+# vs. the PDF's own front page) - see dnd_renamer_gui.py. Unlike the
+# other hooks, this one is a blocking round-trip: it's called from the
+# scan's background thread and must return "yes"/"no"/"stop" only once
+# an actual human has clicked something, so the GUI side of it hands the
+# request to the main thread (Tkinter's home) and blocks on a
+# threading.Event until a button click sets it.
+PROGRESS_HOOK = None
+CONFIRM_HOOK = None
+YESNO_HOOK = None
+CANCEL_EVENT = threading.Event()
+PAUSE_EVENT = threading.Event()
+
+
+def _report_progress(phase, completed, total):
+    if PROGRESS_HOOK is not None:
+        try:
+            PROGRESS_HOOK(phase, completed, total)
+        except Exception:
+            pass
+
+
+def _confirm_suggestion(pdf_file, safe_title, detail, box_art_path, preview_image):
+    """Asks a human to confirm or reject a rename (a never-yet-applied
+    guess, or one already applied on a low-confidence layer) via
+    CONFIRM_HOOK (a GUI comparison dialog showing the catalog's box art
+    next to the PDF's own front page) if one is registered, else the
+    original console y/n prompt. `detail` is a short, already-formatted
+    description of why this suggestion was made (e.g. "(guess from
+    document text, score 0.62)" or "[Legacy filename match (low
+    confidence)]") - callers differ in what they have to say there, but
+    the dialog itself doesn't need to know which case it is. Returns
+    "yes", "no", or "stop" (stop reviewing the rest, matching Ctrl+C/EOF
+    at the console prompt)."""
+    if CONFIRM_HOOK is not None:
+        try:
+            return CONFIRM_HOOK({
+                "pdf_file": pdf_file,
+                "safe_title": safe_title,
+                "detail": detail,
+                "box_art_path": box_art_path,
+                "preview_image": preview_image,
+            })
+        except Exception:
+            pass  # fall through to the console prompt as a safety net
+    try:
+        answer = input(f"'{pdf_file}' -> '{safe_title}.pdf'?  {detail}  [y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return "stop"
+    return "yes" if answer in ("y", "yes") else "no"
+
+
+def _confirm_yesno(message, allow_stop=False):
+    """Plain yes/no counterpart to _confirm_suggestion, for a gate
+    question with nothing to visually compare (e.g. "Review best-guess
+    suggestions for them one at a time?"). Via YESNO_HOOK (a GUI dialog)
+    if one is registered, else the original console y/n prompt. Returns
+    "yes" or "no", plus "stop" when allow_stop is set and the console
+    prompt hit Ctrl+C/EOF (there's no interactive terminal under the
+    GUI, so without a hook this always resolves to "stop"/"no")."""
+    if YESNO_HOOK is not None:
+        try:
+            return YESNO_HOOK(message, allow_stop)
+        except Exception:
+            pass  # fall through to the console prompt as a safety net
+    try:
+        answer = input(f"{message} [y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return "stop" if allow_stop else "no"
+    return "yes" if answer in ("y", "yes") else "no"
+
+
+def _check_cancelled():
+    if CANCEL_EVENT.is_set():
+        raise KeyboardInterrupt
+
+
+def _check_control():
+    """Call at each of the scan/rename loop's natural checkpoints."""
+    _check_cancelled()
+    while PAUSE_EVENT.is_set():
+        time.sleep(0.2)
+        _check_cancelled()
+
 
 def _strip_quotes(raw):
     # Windows Explorer's "Copy as path" wraps the value in quotes.
@@ -365,60 +479,84 @@ def configure_paths():
     visible from this session - see the UNC-path note printed on failure),
     or whenever the user asks to change them (e.g. switching to a
     different platform's XML, like D&D 5th Edition instead of D&D Classic
-    Editions). Sets the XML_PATH/PDF_DIRECTORY/IMAGE_DIRECTORY/
-    OUTPUT_DIRECTORY globals used by the rest of the script."""
+    Editions). Prompts via a GUI window (four browsable fields) when
+    tkinter is importable - see dnd_renamer_gui.py - falling back to the
+    console prompts below otherwise. Sets the XML_PATH/PDF_DIRECTORY/
+    IMAGE_DIRECTORY/OUTPUT_DIRECTORY globals used by the rest of the
+    script."""
     global XML_PATH, PDF_DIRECTORY, IMAGE_DIRECTORY, OUTPUT_DIRECTORY
+
+    try:
+        from dnd_renamer_gui import confirm_paths_gui, configure_paths_gui
+    except ImportError:
+        confirm_paths_gui = configure_paths_gui = None
 
     config = _load_config()
     reconfigure = not _config_is_fully_valid(config)
 
     if not reconfigure:
-        print("Using saved settings:")
-        print(f"  LaunchBox XML file : {config['xml_path']}")
-        print(f"  PDF folder         : {config['pdf_directory']}")
-        print(f"  Image folder       : {config['image_directory']}")
-        print(f"  Output folder      : {config['output_directory']}")
-        try:
-            answer = input("Press Enter to continue, or type 'c' to change any of these: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print("\nCancelled.")
-            sys.exit(1)
-        reconfigure = answer in ("c", "change")
+        if confirm_paths_gui is not None:
+            choice = confirm_paths_gui(config)
+            if choice is None:
+                print("\nCancelled.")
+                sys.exit(1)
+            reconfigure = choice == "change"
+        else:
+            print("Using saved settings:")
+            print(f"  LaunchBox XML file : {config['xml_path']}")
+            print(f"  PDF folder         : {config['pdf_directory']}")
+            print(f"  Image folder       : {config['image_directory']}")
+            print(f"  Output folder      : {config['output_directory']}")
+            try:
+                answer = input("Press Enter to continue, or type 'c' to change any of these: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print("\nCancelled.")
+                sys.exit(1)
+            reconfigure = answer in ("c", "change")
 
     if reconfigure:
         stale = bool(config) and not _config_is_fully_valid(config)
-        print()
-        print("=" * 50)
-        if stale:
-            print("  One or more saved paths couldn't be found. If a path")
-            print("  uses a mapped drive letter (e.g. Z:\\...), it may only")
-            print("  exist in a different login session - try the network")
-            print("  path instead, e.g. \\\\server\\share\\folder.")
-        else:
-            print("  Set up folder paths (saved for next time).")
-        print(f"  Config file: {CONFIG_PATH}")
-        print("=" * 50 + "\n")
 
-        config["xml_path"] = prompt_for_path(
-            r"Path to the LaunchBox platform XML file for this edition (e.g. C:\LaunchBox\Data\Platforms\D&D Classic Editions.xml, or ...\D&D 5th Edition.xml):",
-            "file",
-            default=config.get("xml_path") if os.path.isfile(config.get("xml_path", "")) else None,
-        )
-        config["pdf_directory"] = prompt_for_path(
-            "Path to the folder containing the PDFs you want renamed:",
-            "dir",
-            default=config.get("pdf_directory") if os.path.isdir(config.get("pdf_directory", "")) else None,
-        )
-        config["image_directory"] = prompt_for_path(
-            r"Path to the LaunchBox 'Box - Front' image folder for this platform:",
-            "dir",
-            default=config.get("image_directory") if os.path.isdir(config.get("image_directory", "")) else None,
-        )
-        config["output_directory"] = prompt_for_path(
-            "Output folder for the renamed PDFs (press Enter to use the same folder as the PDFs above):",
-            "output_dir",
-            default=config["pdf_directory"],
-        )
+        if configure_paths_gui is not None:
+            print("\nOpening the setup window...\n")
+            new_config = configure_paths_gui(config, stale=stale)
+            if new_config is None:
+                print("Cancelled.")
+                sys.exit(1)
+            config = new_config
+        else:
+            print()
+            print("=" * 50)
+            if stale:
+                print("  One or more saved paths couldn't be found. If a path")
+                print("  uses a mapped drive letter (e.g. Z:\\...), it may only")
+                print("  exist in a different login session - try the network")
+                print("  path instead, e.g. \\\\server\\share\\folder.")
+            else:
+                print("  Set up folder paths (saved for next time).")
+            print(f"  Config file: {CONFIG_PATH}")
+            print("=" * 50 + "\n")
+
+            config["xml_path"] = prompt_for_path(
+                r"Path to the LaunchBox platform XML file for this edition (e.g. C:\LaunchBox\Data\Platforms\D&D Classic Editions.xml, or ...\D&D 5th Edition.xml):",
+                "file",
+                default=config.get("xml_path") if os.path.isfile(config.get("xml_path", "")) else None,
+            )
+            config["pdf_directory"] = prompt_for_path(
+                "Path to the folder containing the PDFs you want renamed:",
+                "dir",
+                default=config.get("pdf_directory") if os.path.isdir(config.get("pdf_directory", "")) else None,
+            )
+            config["image_directory"] = prompt_for_path(
+                r"Path to the LaunchBox 'Box - Front' image folder for this platform:",
+                "dir",
+                default=config.get("image_directory") if os.path.isdir(config.get("image_directory", "")) else None,
+            )
+            config["output_directory"] = prompt_for_path(
+                "Output folder for the renamed PDFs (press Enter to use the same folder as the PDFs above):",
+                "output_dir",
+                default=config["pdf_directory"],
+            )
 
         save_config(config)
         print(f"\nSaved. (Edit or delete {CONFIG_PATH} to change these later.)\n")
@@ -729,6 +867,11 @@ def prompt_scan_mode(skip_candidate_count, total_count):
     one file the incremental path could actually skip."""
     print(f"\n{skip_candidate_count} of {total_count} PDFs are unchanged (same size and modified time) "
           f"since they were last confidently identified.")
+    if YESNO_HOOK is not None:
+        decision = _confirm_yesno(
+            f"Skip those {skip_candidate_count} unchanged, already-confirmed file(s) and only scan the rest (incremental)?"
+        )
+        return "incremental" if decision == "yes" else "full"
     while True:
         try:
             answer = input(
@@ -1197,6 +1340,39 @@ def unclaimed_pool_match(internal_text, page_count, file_size, unclaimed_xml_ite
     return None, None
 
 
+def _find_box_art_path(display_name, image_library):
+    """Reverse lookup from a resolve_display_name() result back to the
+    box-art file it came from, for the visual side-by-side comparison in
+    the low-confidence review step. Deliberately not a change to
+    resolve_display_name's own return value - that function has callers
+    throughout the scan that only ever wanted the name string, and its
+    one fallback branch (no image_library entry at all) can't produce a
+    path anyway. Returns None if nothing matches (fallback branch, or
+    the image was removed from disk after resolve_display_name ran)."""
+    for img in image_library:
+        if img['original_name'] == display_name:
+            return img['file_path']
+    return None
+
+
+def _extract_first_page_image(full_pdf_path):
+    """Best-effort preview of the PDF's own front page for a human
+    reviewing a low-confidence suggestion - the same embedded-image
+    extraction pdf_cover_hash uses for hashing, just returning the image
+    itself. Only works for scanned PDFs (a raster image embedded on page
+    1); returns None for born-digital/text PDFs with no such image, or
+    on any read error - the caller shows a placeholder in that case."""
+    try:
+        reader = PdfReader(full_pdf_path)
+        if len(reader.pages) == 0:
+            return None
+        for img in reader.pages[0].images:
+            return img.image if img.image is not None else Image.open(io.BytesIO(img.data))
+    except Exception:
+        pass
+    return None
+
+
 def best_guess_for_unmatched(full_pdf_path, xml_items, image_library, idf_table):
     """Only ever called for a file every confident layer above has
     already given up on. Computes the single strongest candidate anyway
@@ -1204,8 +1380,10 @@ def best_guess_for_unmatched(full_pdf_path, xml_items, image_library, idf_table)
     unmatched pile has somewhere to start instead of nothing. This is
     safe specifically because it's advisory, never auto-applied: a
     human confirming or rejecting the suggestion IS the safety check
-    here, not the score. Returns (suggested_title, score, source_label)
-    or None if there's nothing even worth suggesting."""
+    here, not the score. Returns (suggested_title, score, source_label,
+    box_art_path) - box_art_path is None if the catalog has no image for
+    the suggested title - or None if there's nothing even worth
+    suggesting."""
     try:
         reader = PdfReader(full_pdf_path)
     except Exception:
@@ -1250,7 +1428,8 @@ def best_guess_for_unmatched(full_pdf_path, xml_items, image_library, idf_table)
     if not best:
         return None
     score, item, source = best
-    return resolve_display_name(item, image_library), score, source
+    display_name = resolve_display_name(item, image_library)
+    return display_name, score, source, _find_box_art_path(display_name, image_library)
 
 
 BLANK_FORM_FALLBACK_MIN_SCORE = 0.5
@@ -1832,6 +2011,7 @@ def execute_renames(plans, output_directory):
         # be blocked by a collision with a file that's itself about to
         # vacate that name later in this same run.
         for pdf_file, full_pdf_path, target_final_title, match_method in plans:
+            _check_control()
             if not target_final_title:
                 results.append((pdf_file, match_method, None, False))
                 continue
@@ -1869,6 +2049,7 @@ def execute_renames(plans, output_directory):
         # still gets the numbered " (2)", " (3)", ... treatment rather than
         # overwriting.
         for pdf_file, temp_path, wanted_name, match_method in move_list:
+            _check_control()
             new_filename = wanted_name
             new_path = os.path.join(output_directory, new_filename)
             base_name = wanted_name[:-len(".pdf")] if wanted_name.lower().endswith(".pdf") else wanted_name
@@ -2056,21 +2237,25 @@ def _drop_low_confidence_tag(match_method):
     return cleaned.strip()
 
 
-def review_low_confidence_matches(results):
+def review_low_confidence_matches(results, output_directory, image_library, plan_targets):
     """Post-scan step: for every file this run renamed based on a low-
     confidence layer (identify_file_pass2's legacy filename/substring
     matching - the last-resort layers, tagged "(low confidence)" in their
-    match_method), offers to confirm each one by hand. Those matches are
-    deliberately excluded from the fingerprint cache and scan index while
-    unconfirmed (see identify_file_pass1's caching-exclusion note) -
-    caching an unverified guess would make it permanent for every future
-    encounter of the identical file. A human confirming one is a stronger
-    signal than any automated layer, so a confirmed entry has its
-    match_method rewritten to drop the "(low confidence)" tag, which lets
-    it flow into the exact same caching/scan-index logic a high-confidence
-    automated match already gets, further down in run_matching_agent.
-    Returns a new results list with confirmed entries updated in place;
-    unconfirmed/declined ones are returned unchanged."""
+    match_method), offers to confirm each one by hand - the same visual
+    box-art-vs-front-page comparison _confirm_suggestion shows for a
+    never-yet-applied guess, since this is the identical "is this rename
+    right?" question, just for a file that's already been moved. Those
+    matches are deliberately excluded from the fingerprint cache and scan
+    index while unconfirmed (see identify_file_pass1's caching-exclusion
+    note) - caching an unverified guess would make it permanent for every
+    future encounter of the identical file. A human confirming one is a
+    stronger signal than any automated layer, so a confirmed entry has
+    its match_method rewritten to drop the "(low confidence)" tag, which
+    lets it flow into the exact same caching/scan-index logic a high-
+    confidence automated match already gets, further down in
+    run_matching_agent. Returns a new results list with confirmed
+    entries updated in place; unconfirmed/declined ones are returned
+    unchanged."""
     candidates = [
         i for i, (pdf_file, match_method, new_filename, already_correct) in enumerate(results)
         if new_filename and "(low confidence)" in match_method
@@ -2079,24 +2264,24 @@ def review_low_confidence_matches(results):
         return results
 
     print(f"\n{len(candidates)} file(s) this run were renamed based on a low-confidence guess.")
-    try:
-        answer = input("Review and confirm which are correct, so they're trusted next time? [y/N]: ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        print("\nSkipping review.")
-        return results
-    if answer not in ("y", "yes"):
+    if _confirm_yesno("Review and confirm which are correct, so they're trusted next time?") != "yes":
+        print("Skipping review.")
         return results
 
     results = list(results)
     confirmed = 0
     for i in candidates:
+        _check_control()
         pdf_file, match_method, new_filename, already_correct = results[i]
-        try:
-            answer = input(f"'{pdf_file}' -> '{new_filename}'  [{match_method}]  Correct? [y/N]: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print("\nStopping review - anything already confirmed stays trusted.")
+        on_disk_title = new_filename[:-4] if new_filename.lower().endswith(".pdf") else new_filename
+        display_name = plan_targets.get(pdf_file, on_disk_title)
+        box_art_path = _find_box_art_path(display_name, image_library)
+        preview_image = _extract_first_page_image(os.path.join(output_directory, new_filename))
+        decision = _confirm_suggestion(pdf_file, on_disk_title, f"[{match_method}]", box_art_path, preview_image)
+        if decision == "stop":
+            print("Stopping review - anything already confirmed stays trusted.")
             break
-        if answer in ("y", "yes"):
+        if decision == "yes":
             results[i] = (pdf_file, f"Human-Confirmed ({_drop_low_confidence_tag(match_method)})", new_filename, already_correct)
             confirmed += 1
 
@@ -2119,12 +2304,8 @@ def review_unmatched_interactively(unmatched, output_directory, fingerprint_cach
         return 0
 
     print(f"\n{len(unmatched)} file(s) couldn't be confidently matched.")
-    try:
-        answer = input("Review best-guess suggestions for them one at a time? [y/N]: ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        print("\nSkipping review.")
-        return 0
-    if answer not in ("y", "yes"):
+    if _confirm_yesno("Review best-guess suggestions for them one at a time?") != "yes":
+        print("Skipping review.")
         return 0
 
     print("\nComputing suggestions (this re-uses the same OCR/content analysis as the main scan)...")
@@ -2140,7 +2321,9 @@ def review_unmatched_interactively(unmatched, output_directory, fingerprint_cach
             for pdf_file, full_pdf_path in unmatched
         }
         completed = 0
+        _report_progress("Computing suggestions", 0, len(unmatched))
         for future in concurrent.futures.as_completed(futures):
+            _check_control()
             pdf_file, full_pdf_path = futures[future]
             try:
                 _, _, guess = future.result()
@@ -2149,28 +2332,28 @@ def review_unmatched_interactively(unmatched, output_directory, fingerprint_cach
                 print(f"\n⚠️  Couldn't compute a suggestion for '{pdf_file}': {e}")
             guesses[pdf_file] = (full_pdf_path, guess)
             completed += 1
-            print(f"  Computed ({completed}/{len(unmatched)}): {pdf_file}".ljust(100), end="\r", flush=True)
+            print(f"  Computed ({completed}/{len(unmatched)}): {pdf_file}")
+            _report_progress("Computing suggestions", completed, len(unmatched))
         executor.shutdown(wait=True)
     except KeyboardInterrupt:
         executor.shutdown(wait=False, cancel_futures=True)
         print("\n\nCancelled computing suggestions - nothing was renamed in this step.")
         return 0
-    print(" " * 100, end="\r")
 
     confirmed = 0
     with_guess = [(pdf_file, fp, g) for pdf_file, (fp, g) in guesses.items() if g]
     print(f"Have a suggestion for {len(with_guess)} of {len(unmatched)} files.\n")
 
-    for pdf_file, full_pdf_path, (suggested_title, score, source) in with_guess:
+    for pdf_file, full_pdf_path, (suggested_title, score, source, box_art_path) in with_guess:
+        _check_control()
         safe_title = "".join(c for c in suggested_title if c not in '<>:"/\\|?*').strip()
-        try:
-            answer = input(
-                f"'{pdf_file}' -> '{safe_title}.pdf'?  (guess from {source}, score {score:.2f})  [y/N]: "
-            ).strip().lower()
-        except (EOFError, KeyboardInterrupt):
+        preview_image = _extract_first_page_image(full_pdf_path)
+        detail = f"(guess from {source}, score {score:.2f})"
+        decision = _confirm_suggestion(pdf_file, safe_title, detail, box_art_path, preview_image)
+        if decision == "stop":
             print("\nStopping review - anything already confirmed stays renamed.")
             break
-        if answer not in ("y", "yes"):
+        if decision != "yes":
             continue
 
         new_filename = f"{safe_title}.pdf"
@@ -2236,6 +2419,7 @@ def _run_parallel_scan(file_pairs, dispatch, init_fn, init_args, progress_verb="
     file_hashes = {}
     cache_hits = 0
     completed = 0
+    _report_progress(progress_verb, 0, total_files)
 
     def new_executor():
         return concurrent.futures.ProcessPoolExecutor(
@@ -2264,6 +2448,7 @@ def _run_parallel_scan(file_pairs, dispatch, init_fn, init_args, progress_verb="
     try:
         refill()
         while futures:
+            _check_control()
             done, _ = concurrent.futures.wait(
                 set(futures), timeout=5, return_when=concurrent.futures.FIRST_COMPLETED
             )
@@ -2280,8 +2465,8 @@ def _run_parallel_scan(file_pairs, dispatch, init_fn, init_args, progress_verb="
                     cache_hits += 1
 
                 completed += 1
-                progress_label = f"  {progress_verb} ({completed}/{total_files}): {pdf_file}"
-                print(progress_label[:100].ljust(100), end="\r", flush=True)
+                print(f"  {progress_verb} ({completed}/{total_files}): {pdf_file}")
+                _report_progress(progress_verb, completed, total_files)
 
             now = time.time()
             stale = {f for f, (_, _, submit_time) in futures.items() if now - submit_time > SCAN_TASK_TIMEOUT}
@@ -2307,10 +2492,16 @@ def _run_parallel_scan(file_pairs, dispatch, init_fn, init_args, progress_verb="
                                   f"Skipped -> exceeded {SCAN_TASK_TIMEOUT}s (likely a malformed embedded image hanging the PDF decoder)"))
                     file_hashes[pdf_file] = None
                     completed += 1
-                    print(" " * 100, end="\r")
                     print(f"⚠️  '{pdf_file}' didn't finish within {SCAN_TASK_TIMEOUT}s - skipped, rest of the scan continues.")
+                    _report_progress(progress_verb, completed, total_files)
                 executor = new_executor()
 
+            # Re-checked here, not just at the top of the loop - without
+            # this, a pause requested while this iteration was already
+            # past its check still fell through to one more refill(),
+            # dispatching a fresh batch of up to SCAN_WORKERS new files
+            # before pausing actually took visible effect.
+            _check_control()
             refill()
     except KeyboardInterrupt:
         kill_pool(executor)
@@ -2324,6 +2515,7 @@ def run_matching_agent():
     print("==================================================")
     print("  LaunchBox D&D Omni-Method Renamer Agent v22.0   ")
     print("==================================================\n")
+    _report_progress("Loading catalog", 0, 0)
 
     image_library = load_image_library(IMAGE_DIRECTORY)
     xml_items = load_launchbox_db(XML_PATH)
@@ -2434,7 +2626,6 @@ def run_matching_agent():
         ]
         pass2_by_name = {}
         if still_unresolved:
-            print(" " * 100, end="\r")
             print(f"Pass 1 complete. Running deeper identification (process of elimination, "
                   f"cover art, OCR) on {len(still_unresolved)} still-unmatched file(s)...\n")
             # Built once here (not per worker) and only when pass 2 is
@@ -2525,7 +2716,6 @@ def run_matching_agent():
     plan_by_name = {p[0]: p for p in skip_plans + scanned_plans}
     plans = [plan_by_name[pdf_file] for pdf_file in pdf_files]
 
-    print(" " * 100, end="\r")  # clear the last progress line before real output starts
     print(f"Scan complete - identifying names for {total_files} PDFs.\n")
     if cache_hits:
         print(f"({cache_hits} of those were instant fingerprint-cache hits.)\n")
@@ -2557,7 +2747,7 @@ def run_matching_agent():
             print(f"✅ [{match_method}]\n   '{pdf_file}'  ->  '{new_filename}'")
             matched_count += 1
 
-    results = review_low_confidence_matches(results)
+    results = review_low_confidence_matches(results, OUTPUT_DIRECTORY, image_library, plan_targets)
 
     # Seed the fingerprint cache from every match just confirmed by a
     # high-confidence method, so an identical copy of this same file -
@@ -2616,6 +2806,7 @@ def run_matching_agent():
     print("\n==================================================")
     print(f"  Finished. Matched {matched_count} of {len(pdf_files)} PDFs.")
     print("==================================================")
+    _report_progress("Finished", total_files, total_files)
 
     plan_paths = {pdf_file: full_pdf_path for pdf_file, full_pdf_path, *_rest in plans}
     unmatched = [
@@ -2651,7 +2842,28 @@ if __name__ == "__main__":
     try:
         check_dependencies()
         configure_paths()
-        run_matching_agent()
+
+        # The scan itself runs in a window showing live progress and a
+        # scrolling log of everything that would otherwise only be
+        # visible in the console - see dnd_renamer_gui.run_scan_window -
+        # falling back to running it directly in the console (as before)
+        # if tkinter isn't importable.
+        try:
+            from dnd_renamer_gui import run_scan_window
+        except ImportError:
+            run_scan_window = None
+
+        if run_scan_window is not None:
+            # Passing this module's own object rather than letting
+            # run_scan_window do `import dnd_renamer` itself - when run
+            # directly (`python dnd_renamer.py`), this file executes as
+            # "__main__", not as a module named "dnd_renamer", so that
+            # import would silently load a second, disconnected copy of
+            # it instead of finding this one. See run_scan_window's
+            # docstring - this was a real bug (Pause/Cancel did nothing).
+            run_scan_window(run_matching_agent, sys.modules[__name__])
+        else:
+            run_matching_agent()
     except SystemExit:
         raise
     except KeyboardInterrupt:
