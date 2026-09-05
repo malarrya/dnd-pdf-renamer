@@ -2306,7 +2306,7 @@ def review_low_confidence_matches(results, output_directory, image_library, plan
     return results
 
 
-def review_unmatched_interactively(unmatched, output_directory, fingerprint_cache):
+def review_unmatched_interactively(unmatched, output_directory, fingerprint_cache, scan_index, renaming_in_place):
     """Post-scan step: for every file the automated pass couldn't
     confidently identify, computes the single best guess anyway (see
     best_guess_for_unmatched) and asks the user to confirm it one at a
@@ -2315,7 +2315,13 @@ def review_unmatched_interactively(unmatched, output_directory, fingerprint_cach
     confirming a suggestion is a stronger signal than any automated
     threshold, so it's trusted the same way a high-confidence automated
     match is. Anything else (including Ctrl+C) skips that file; nothing
-    already confirmed is undone by skipping or cancelling the rest."""
+    already confirmed is undone by skipping or cancelling the rest.
+
+    When renaming in place, a confirmed file also gets a scan_index
+    entry, the same as any other confirmed match - see
+    run_matching_agent's own scan_index update for why (mirrored here
+    rather than shared, since this runs after that one and on a
+    different, review-specific set of files)."""
     if not unmatched:
         return 0
 
@@ -2357,6 +2363,7 @@ def review_unmatched_interactively(unmatched, output_directory, fingerprint_cach
         return 0
 
     confirmed = 0
+    scan_index_changed = False
     with_guess = [(pdf_file, fp, g) for pdf_file, (fp, g) in guesses.items() if g]
     print(f"Have a suggestion for {len(with_guess)} of {len(unmatched)} files.\n")
 
@@ -2390,9 +2397,24 @@ def review_unmatched_interactively(unmatched, output_directory, fingerprint_cach
         if file_sha256:
             fingerprint_cache[file_sha256] = {"title": suggested_title, "matched_via": f"Human-Confirmed Suggestion ({source})"}
 
+        if renaming_in_place and file_sha256:
+            try:
+                stat = os.stat(new_path)
+            except OSError:
+                stat = None
+            if stat is not None:
+                entry = {"size": stat.st_size, "mtime": stat.st_mtime, "sha256": file_sha256}
+                if scan_index.get(new_filename) != entry:
+                    scan_index[new_filename] = entry
+                    scan_index_changed = True
+                if new_filename != pdf_file and scan_index.pop(pdf_file, None) is not None:
+                    scan_index_changed = True
+
     if confirmed:
         save_fingerprint_cache(CACHE_PATH, fingerprint_cache)
         print(f"\nConfirmed {confirmed} rename(s) and updated the fingerprint cache.")
+    if scan_index_changed:
+        save_scan_index(SCAN_INDEX_PATH, scan_index)
     return confirmed
 
 
@@ -2834,7 +2856,7 @@ def run_matching_agent():
         # rather than offered for review.
         if new_filename is None and pdf_file in plan_paths and not (match_method or "").startswith("Skipped -> exceeded")
     ]
-    review_unmatched_interactively(unmatched, OUTPUT_DIRECTORY, fingerprint_cache)
+    review_unmatched_interactively(unmatched, OUTPUT_DIRECTORY, fingerprint_cache, scan_index, renaming_in_place)
 
 
 if __name__ == "__main__":
