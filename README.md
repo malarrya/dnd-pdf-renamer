@@ -83,6 +83,14 @@ or later - that version's picker dialog opened at a cramped default
 size that truncated longer catalog titles; it now opens as big as the
 main run window (760x445) and is resizable if that's still not enough.
 
+[**v1.3.0**](https://github.com/malarrya/dnd-pdf-renamer/releases/tag/v1.3.0)
+adds two more ways to handle a file the picker's candidate list doesn't
+cover: type the exact title yourself if it isn't in the catalog at all,
+or check a box to also show titles already claimed by another file this
+run (for the rare case a claim was made in error, like a genuine
+duplicate PDF). The dialog is taller (760x600) to fit both without
+clipping the buttons at the bottom.
+
 If you installed v1.0.0 and hit an infinite "Press Enter to continue" loop
 that kept re-spawning itself, update to v1.0.1 or later - that version was
 missing `multiprocessing.freeze_support()`, so a worker process would fail
@@ -134,7 +142,7 @@ python dnd_renamer.py
 
 The scan itself runs in a window showing a progress bar and a scrolling log of everything happening (the same messages you'd otherwise only see in the console), with **Pause** (lets any files already in progress finish, then holds before starting more) and **Cancel** buttons that work at the same safe points a console Ctrl+C always could. Once the scan finishes, it asks - in the same window - whether to review anything left unmatched or renamed on a low-confidence guess:
 - A file already renamed on a low-confidence guess shows the catalog's box-art image side by side with a preview of the PDF's own front page, so you can visually confirm or reject the suggestion instead of judging on the filename alone.
-- A file that couldn't be matched at all shows that same front-page preview next to a searchable list of every catalog title not already claimed by another file this run - the algorithm's best guess, if it has one, comes pre-selected, but you can pick any other title directly instead of just accepting or rejecting that one guess.
+- A file that couldn't be matched at all shows that same front-page preview next to a searchable list of every catalog title not already claimed by another file this run - the algorithm's best guess, if it has one, comes pre-selected, but you can pick any other title directly instead of just accepting or rejecting that one guess. If the correct title isn't in the list, you can type it yourself, or check a box to also show titles already claimed by another file this run (for the rare case a claim was made in error, like a genuine duplicate PDF).
 
 Nothing is renamed without either a confident automated match or your explicit confirmation.
 
