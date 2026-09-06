@@ -112,6 +112,9 @@ window itself hides for the duration of a manual-only review, since it
 has nothing useful to show, and reappears if you switch back to
 automated or the review finishes.
 
+[**v1.5.1**](https://github.com/malarrya/dnd-pdf-renamer/releases/tag/v1.5.1)
+is docs-only - no functional changes from v1.5.0.
+
 If you installed v1.0.0 and hit an infinite "Press Enter to continue" loop
 that kept re-spawning itself, update to v1.0.1 or later - that version was
 missing `multiprocessing.freeze_support()`, so a worker process would fail
