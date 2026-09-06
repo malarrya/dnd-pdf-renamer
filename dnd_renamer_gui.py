@@ -467,10 +467,15 @@ def _show_picker_dialog(root, request):
     algorithm's best guess, if any and still unclaimed, comes
     pre-selected - a human can accept it as-is or pick any other entry
     directly, which matters most exactly when the guess is wrong or
-    there wasn't one at all. Runs on the main thread (a Toplevel child
-    of the run window, not a fresh Tk() root - it must coexist with
-    that window, not replace it). Returns (decision, chosen_title):
-    ("yes", title), ("no", None), or ("stop", None)."""
+    there wasn't one at all. A checkbox reveals request["all_titles"]
+    instead - the full catalog, including titles already claimed by
+    another file this run - for the rare case a claim was made in error
+    (e.g. a genuine duplicate PDF) and the real match got excluded; a
+    separate field lets a human type an exact title that isn't in the
+    catalog at all. Runs on the main thread (a Toplevel child of the run
+    window, not a fresh Tk() root - it must coexist with that window,
+    not replace it). Returns (decision, chosen_title): ("yes", title),
+    ("no", None), or ("stop", None)."""
     try:
         from PIL import Image, ImageTk
         pil_available = True
@@ -483,12 +488,15 @@ def _show_picker_dialog(root, request):
     dialog = tk.Toplevel(root)
     dialog.title("Identify This File")
     dialog.transient(root)
-    # Matches the main run window's own size - the candidate list needs
-    # real room to show a full title without truncating it, and this is
-    # resizable (unlike the run window's own pinned size) so it can be
-    # made bigger still if a user wants more.
-    dialog.geometry("760x445")
-    dialog.minsize(600, 350)
+    # At least as wide as the main run window, and tall enough that
+    # every row of content - including the show-all checkbox and the
+    # custom-title field below the list - actually fits without
+    # clipping the buttons at the bottom (measured empirically: this
+    # dialog's natural packed height is ~585px). minsize is set to the
+    # same floor so manually shrinking the window can't recreate that
+    # same clipping; it can still be made bigger still if wanted.
+    dialog.geometry("760x600")
+    dialog.minsize(760, 600)
 
     main = ttk.Frame(dialog, padding=10)
     main.pack(fill="both", expand=True)
@@ -496,7 +504,7 @@ def _show_picker_dialog(root, request):
     info = (
         f"Currently named:  {request['pdf_file']}\n"
         f"{request['detail']}\n\n"
-        f"Select the correct title below (type to search), or Skip if none match."
+        f"Select the correct title below (type to search), type it in yourself, or Skip if none match."
     )
     ttk.Label(main, text=info, justify="left").pack(anchor="w", pady=(0, 8))
 
@@ -533,6 +541,13 @@ def _show_picker_dialog(root, request):
     search_entry = ttk.Entry(list_col, textvariable=search_var)
     search_entry.pack(fill="x", pady=(0, 4))
 
+    show_all_var = tk.BooleanVar(value=False)
+    ttk.Checkbutton(
+        list_col, variable=show_all_var,
+        text="Also show titles already used by another file this run",
+        command=lambda: populate(search_var.get()),
+    ).pack(anchor="w", pady=(0, 4))
+
     list_frame = ttk.Frame(list_col)
     list_frame.pack(fill="both", expand=True)
     scrollbar = ttk.Scrollbar(list_frame, orient="vertical")
@@ -541,18 +556,40 @@ def _show_picker_dialog(root, request):
     listbox.pack(side="left", fill="both", expand=True)
     scrollbar.pack(side="right", fill="y")
 
-    all_candidates = request["candidates"]
+    custom_row = ttk.Frame(list_col)
+    custom_row.pack(fill="x", pady=(6, 0))
+    ttk.Label(custom_row, text="Or type the exact title yourself:").pack(anchor="w")
+    custom_entry_row = ttk.Frame(custom_row)
+    custom_entry_row.pack(fill="x", pady=(2, 0))
+    custom_var = tk.StringVar()
+    custom_entry = ttk.Entry(custom_entry_row, textvariable=custom_var)
+    custom_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+
+    unclaimed_candidates = request["candidates"]
+    all_titles = request["all_titles"]
     initial_guess = request.get("initial_guess")
+    # Maps what's actually shown in the listbox back to the real title -
+    # an already-claimed entry (only visible with show_all_var checked)
+    # gets a suffix noting that, which has to be stripped back off
+    # before it's usable as a real catalog title.
+    display_to_title = {}
 
     def update_confirm_state(*_a):
         confirm_button.configure(state="normal" if listbox.curselection() else "disabled")
 
+    def update_custom_state(*_a):
+        custom_button.configure(state="normal" if custom_var.get().strip() else "disabled")
+
     def populate(filter_text=""):
         listbox.delete(0, "end")
+        display_to_title.clear()
+        pool = all_titles if show_all_var.get() else unclaimed_candidates
         filter_lower = filter_text.strip().lower()
-        shown = [c for c in all_candidates if filter_lower in c.lower()] if filter_lower else list(all_candidates)
-        for c in shown:
-            listbox.insert("end", c)
+        shown = [t for t in pool if filter_lower in t.lower()] if filter_lower else list(pool)
+        for title in shown:
+            display = title if title in unclaimed_candidates else f"{title}  (already assigned)"
+            display_to_title[display] = title
+            listbox.insert("end", display)
         if not filter_text and initial_guess and initial_guess in shown:
             idx = shown.index(initial_guess)
             listbox.selection_set(idx)
@@ -563,18 +600,31 @@ def _show_picker_dialog(root, request):
         populate(search_var.get())
 
     search_var.trace_add("write", on_search_change)
+    custom_var.trace_add("write", update_custom_state)
 
     def choose(decision):
         if decision == "yes":
             selection = listbox.curselection()
             if not selection:
                 return
-            result["chosen_title"] = listbox.get(selection[0])
+            result["chosen_title"] = display_to_title[listbox.get(selection[0])]
         result["decision"] = decision
+        dialog.destroy()
+
+    def choose_custom():
+        title = custom_var.get().strip()
+        if not title:
+            return
+        result["chosen_title"] = title
+        result["decision"] = "yes"
         dialog.destroy()
 
     listbox.bind("<<ListboxSelect>>", update_confirm_state)
     listbox.bind("<Double-Button-1>", lambda _e: choose("yes"))
+    custom_entry.bind("<Return>", lambda _e: choose_custom())
+
+    custom_button = ttk.Button(custom_entry_row, text="Use This Name", command=choose_custom, state="disabled")
+    custom_button.pack(side="left")
 
     button_row = ttk.Frame(main)
     button_row.pack(fill="x", pady=(10, 0))

@@ -407,27 +407,33 @@ def _confirm_yesno(message, allow_stop=False):
     return "yes" if answer in ("y", "yes") else "no"
 
 
-def _pick_match(pdf_file, preview_image, candidates, initial_guess, detail):
+def _pick_match(pdf_file, preview_image, candidates, all_titles, initial_guess, detail):
     """Asks a human to identify a file that couldn't be confidently
     matched automatically, by showing the PDF's own front page next to
     a searchable list of every catalog title not already claimed by
-    another file this run. The algorithm's best guess (if any) is
-    pre-selected as a convenience, but the human can pick any other
-    entry directly instead of being limited to confirming or rejecting
-    that one guess - useful exactly when the guess is wrong, or when
-    there wasn't one at all. Via PICKER_HOOK (a GUI picker dialog) if
-    one is registered, else the original console y/n prompt on the
-    guess alone - there's no practical console equivalent of browsing/
-    searching a long list, so without a hook this only ever offers the
-    automated guess, same as before. Returns ("yes", chosen_title) to
-    rename the file to chosen_title, ("no", None) to leave it unmatched,
-    or ("stop", None) to stop reviewing the rest."""
+    another file this run (candidates). The algorithm's best guess (if
+    any) is pre-selected as a convenience, but the human can pick any
+    other entry directly instead of being limited to confirming or
+    rejecting that one guess - useful exactly when the guess is wrong,
+    or when there wasn't one at all. all_titles is the full catalog
+    (including titles already claimed elsewhere this run) - offered as
+    an opt-in expanded view for the rare case a claim was made in error
+    (e.g. a genuine duplicate PDF) and the real match got excluded; a
+    human can also type an exact title that isn't in the catalog at all.
+    Via PICKER_HOOK (a GUI picker dialog) if one is registered, else the
+    original console y/n prompt on the guess alone - there's no
+    practical console equivalent of browsing/searching a long list, so
+    without a hook this only ever offers the automated guess, same as
+    before. Returns ("yes", chosen_title) to rename the file to
+    chosen_title, ("no", None) to leave it unmatched, or ("stop", None)
+    to stop reviewing the rest."""
     if PICKER_HOOK is not None:
         try:
             return PICKER_HOOK({
                 "pdf_file": pdf_file,
                 "preview_image": preview_image,
                 "candidates": candidates,
+                "all_titles": all_titles,
                 "initial_guess": initial_guess,
                 "detail": detail,
             })
@@ -2342,7 +2348,7 @@ def review_low_confidence_matches(results, output_directory, image_library, plan
     return results
 
 
-def review_unmatched_interactively(unmatched, output_directory, fingerprint_cache, scan_index, renaming_in_place, unclaimed_titles):
+def review_unmatched_interactively(unmatched, output_directory, fingerprint_cache, scan_index, renaming_in_place, unclaimed_titles, all_titles):
     """Post-scan step: for every file the automated pass couldn't
     confidently identify, shows the PDF's own front page next to a
     searchable list of every catalog title not already claimed by
@@ -2431,7 +2437,7 @@ def review_unmatched_interactively(unmatched, output_directory, fingerprint_cach
         if initial_guess not in remaining_candidates:
             initial_guess = None
 
-        decision, chosen_title = _pick_match(pdf_file, preview_image, remaining_candidates, initial_guess, detail)
+        decision, chosen_title = _pick_match(pdf_file, preview_image, remaining_candidates, all_titles, initial_guess, detail)
         if decision == "stop":
             print("\nStopping review - anything already confirmed stays renamed.")
             break
@@ -2453,10 +2459,12 @@ def review_unmatched_interactively(unmatched, output_directory, fingerprint_cach
             continue
 
         confirmed += 1
-        matched_via = (
-            f"Human-Confirmed Suggestion ({source})" if source and chosen_title == initial_guess
-            else "Human-Selected (from catalog list)"
-        )
+        if source and chosen_title == initial_guess:
+            matched_via = f"Human-Confirmed Suggestion ({source})"
+        elif chosen_title in all_titles:
+            matched_via = "Human-Selected (from catalog list)"
+        else:
+            matched_via = "Human-Entered (custom title)"
         file_sha256 = hash_file_sha256(new_path)
         if file_sha256:
             fingerprint_cache[file_sha256] = {"title": chosen_title, "matched_via": matched_via}
@@ -2929,11 +2937,11 @@ def run_matching_agent():
     # can't accidentally create a duplicate the automated layers were
     # specifically designed to avoid.
     claimed_titles = {title for title in plan_targets.values() if title}
-    unclaimed_titles = sorted({
-        display_name for display_name in (resolve_display_name(item, image_library) for item in xml_items)
-        if display_name not in claimed_titles
-    })
-    review_unmatched_interactively(unmatched, OUTPUT_DIRECTORY, fingerprint_cache, scan_index, renaming_in_place, unclaimed_titles)
+    all_titles = sorted({resolve_display_name(item, image_library) for item in xml_items})
+    unclaimed_titles = [title for title in all_titles if title not in claimed_titles]
+    review_unmatched_interactively(
+        unmatched, OUTPUT_DIRECTORY, fingerprint_cache, scan_index, renaming_in_place, unclaimed_titles, all_titles
+    )
 
 
 if __name__ == "__main__":
