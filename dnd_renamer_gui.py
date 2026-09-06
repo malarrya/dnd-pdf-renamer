@@ -443,6 +443,150 @@ def _show_confirm_dialog(root, request):
     return result["decision"]
 
 
+def _make_picker_hook(q):
+    """Returns the function installed as dnd_renamer.PICKER_HOOK - same
+    cross-thread queue+Event pattern as _make_confirm_hook, but returns
+    (decision, chosen_title) instead of a bare decision, since the human
+    might pick a title other than whatever came pre-selected."""
+
+    def picker_hook(request):
+        result_holder = {"decision": "no", "chosen_title": None}
+        event = threading.Event()
+        q.put(("picker_request", request, result_holder, event))
+        event.wait()
+        return result_holder["decision"], result_holder["chosen_title"]
+
+    return picker_hook
+
+
+def _show_picker_dialog(root, request):
+    """Modal identification dialog for one file that couldn't be
+    confidently matched automatically: the PDF's own front page next to
+    a searchable, scrollable list of every catalog title not already
+    claimed by another file this run (request["candidates"]). The
+    algorithm's best guess, if any and still unclaimed, comes
+    pre-selected - a human can accept it as-is or pick any other entry
+    directly, which matters most exactly when the guess is wrong or
+    there wasn't one at all. Runs on the main thread (a Toplevel child
+    of the run window, not a fresh Tk() root - it must coexist with
+    that window, not replace it). Returns (decision, chosen_title):
+    ("yes", title), ("no", None), or ("stop", None)."""
+    try:
+        from PIL import Image, ImageTk
+        pil_available = True
+    except ImportError:
+        pil_available = False
+
+    result = {"decision": "no", "chosen_title": None}
+    photo_refs = []  # keep the PhotoImage alive for the dialog's lifetime - Tk drops a garbage-collected one silently, leaving a blank label
+
+    dialog = tk.Toplevel(root)
+    dialog.title("Identify This File")
+    dialog.transient(root)
+
+    main = ttk.Frame(dialog, padding=10)
+    main.pack(fill="both", expand=True)
+
+    info = (
+        f"Currently named:  {request['pdf_file']}\n"
+        f"{request['detail']}\n\n"
+        f"Select the correct title below (type to search), or Skip if none match."
+    )
+    ttk.Label(main, text=info, justify="left").pack(anchor="w", pady=(0, 8))
+
+    body = ttk.Frame(main)
+    body.pack(fill="both", expand=True)
+
+    image_col = ttk.Frame(body)
+    image_col.pack(side="left", padx=(0, 10), anchor="n")
+    ttk.Label(image_col, text="This file's own\nfront page", font=("", 8, "bold")).pack()
+    THUMB_SIZE = (160, 210)
+    img = request["preview_image"]
+    if img is not None and pil_available:
+        try:
+            img = img.copy()
+            img.thumbnail(THUMB_SIZE)
+            photo = ImageTk.PhotoImage(img)
+            photo_refs.append(photo)
+            ttk.Label(image_col, image=photo).pack()
+        except Exception:
+            img = None
+    else:
+        img = None
+    if img is None:
+        placeholder = ttk.Label(
+            image_col, text="(no preview\navailable)", justify="center", anchor="center",
+            relief="solid", borderwidth=1, width=18,
+        )
+        placeholder.pack(ipady=THUMB_SIZE[1] // 2 - 15)
+
+    list_col = ttk.Frame(body)
+    list_col.pack(side="left", fill="both", expand=True)
+
+    search_var = tk.StringVar()
+    search_entry = ttk.Entry(list_col, textvariable=search_var)
+    search_entry.pack(fill="x", pady=(0, 4))
+
+    list_frame = ttk.Frame(list_col)
+    list_frame.pack(fill="both", expand=True)
+    scrollbar = ttk.Scrollbar(list_frame, orient="vertical")
+    listbox = tk.Listbox(list_frame, height=12, width=42, exportselection=False, yscrollcommand=scrollbar.set)
+    scrollbar.configure(command=listbox.yview)
+    listbox.pack(side="left", fill="both", expand=True)
+    scrollbar.pack(side="right", fill="y")
+
+    all_candidates = request["candidates"]
+    initial_guess = request.get("initial_guess")
+
+    def update_confirm_state(*_a):
+        confirm_button.configure(state="normal" if listbox.curselection() else "disabled")
+
+    def populate(filter_text=""):
+        listbox.delete(0, "end")
+        filter_lower = filter_text.strip().lower()
+        shown = [c for c in all_candidates if filter_lower in c.lower()] if filter_lower else list(all_candidates)
+        for c in shown:
+            listbox.insert("end", c)
+        if not filter_text and initial_guess and initial_guess in shown:
+            idx = shown.index(initial_guess)
+            listbox.selection_set(idx)
+            listbox.see(idx)
+        update_confirm_state()
+
+    def on_search_change(*_a):
+        populate(search_var.get())
+
+    search_var.trace_add("write", on_search_change)
+
+    def choose(decision):
+        if decision == "yes":
+            selection = listbox.curselection()
+            if not selection:
+                return
+            result["chosen_title"] = listbox.get(selection[0])
+        result["decision"] = decision
+        dialog.destroy()
+
+    listbox.bind("<<ListboxSelect>>", update_confirm_state)
+    listbox.bind("<Double-Button-1>", lambda _e: choose("yes"))
+
+    button_row = ttk.Frame(main)
+    button_row.pack(fill="x", pady=(10, 0))
+    ttk.Button(button_row, text="Stop Reviewing", command=lambda: choose("stop")).pack(side="left")
+    ttk.Button(button_row, text="Skip This File", command=lambda: choose("no")).pack(side="right", padx=(8, 0))
+    confirm_button = ttk.Button(button_row, text="Confirm Selected", command=lambda: choose("yes"))
+    confirm_button.pack(side="right")
+
+    populate()
+
+    dialog.protocol("WM_DELETE_WINDOW", lambda: choose("no"))
+    _center_on_parent(dialog, root)
+    dialog.grab_set()
+    search_entry.focus_set()
+    dialog.wait_window()
+    return result["decision"], result["chosen_title"]
+
+
 def _force_close(dnd_renamer, root):
     """Guarantees the whole application actually exits when Close is
     clicked or the window's X is pressed - not just this window. A
@@ -527,6 +671,7 @@ def run_scan_window(run_fn, dnd_renamer):
     dnd_renamer.PROGRESS_HOOK = lambda phase, completed, total: q.put(("progress", phase, completed, total))
     dnd_renamer.CONFIRM_HOOK = _make_confirm_hook(q)
     dnd_renamer.YESNO_HOOK = _make_yesno_hook(q)
+    dnd_renamer.PICKER_HOOK = _make_picker_hook(q)
 
     prev_sigint_handler = None
     try:
@@ -687,6 +832,12 @@ def run_scan_window(run_fn, dnd_renamer):
                             result_holder["decision"] = _show_yesno_dialog(root, message, allow_stop)
                         finally:
                             event.set()
+                    elif kind == "picker_request":
+                        request, result_holder, event = payload
+                        try:
+                            result_holder["decision"], result_holder["chosen_title"] = _show_picker_dialog(root, request)
+                        finally:
+                            event.set()
                 except Exception:
                     # A single bad item (or an exception from tkinter
                     # itself under load) must never silently kill this
@@ -741,6 +892,7 @@ def run_scan_window(run_fn, dnd_renamer):
     dnd_renamer.PROGRESS_HOOK = None
     dnd_renamer.CONFIRM_HOOK = None
     dnd_renamer.YESNO_HOOK = None
+    dnd_renamer.PICKER_HOOK = None
     if prev_sigint_handler is not None:
         try:
             signal.signal(signal.SIGINT, prev_sigint_handler)

@@ -344,6 +344,7 @@ SCAN_INDEX_PATH = os.path.join(_APP_DIR, "dnd_renamer_scan_index.json")
 PROGRESS_HOOK = None
 CONFIRM_HOOK = None
 YESNO_HOOK = None
+PICKER_HOOK = None
 CANCEL_EVENT = threading.Event()
 PAUSE_EVENT = threading.Event()
 
@@ -404,6 +405,41 @@ def _confirm_yesno(message, allow_stop=False):
     except (EOFError, KeyboardInterrupt):
         return "stop" if allow_stop else "no"
     return "yes" if answer in ("y", "yes") else "no"
+
+
+def _pick_match(pdf_file, preview_image, candidates, initial_guess, detail):
+    """Asks a human to identify a file that couldn't be confidently
+    matched automatically, by showing the PDF's own front page next to
+    a searchable list of every catalog title not already claimed by
+    another file this run. The algorithm's best guess (if any) is
+    pre-selected as a convenience, but the human can pick any other
+    entry directly instead of being limited to confirming or rejecting
+    that one guess - useful exactly when the guess is wrong, or when
+    there wasn't one at all. Via PICKER_HOOK (a GUI picker dialog) if
+    one is registered, else the original console y/n prompt on the
+    guess alone - there's no practical console equivalent of browsing/
+    searching a long list, so without a hook this only ever offers the
+    automated guess, same as before. Returns ("yes", chosen_title) to
+    rename the file to chosen_title, ("no", None) to leave it unmatched,
+    or ("stop", None) to stop reviewing the rest."""
+    if PICKER_HOOK is not None:
+        try:
+            return PICKER_HOOK({
+                "pdf_file": pdf_file,
+                "preview_image": preview_image,
+                "candidates": candidates,
+                "initial_guess": initial_guess,
+                "detail": detail,
+            })
+        except Exception:
+            pass  # fall through to the console prompt as a safety net
+    if not initial_guess:
+        return "no", None
+    try:
+        answer = input(f"'{pdf_file}' -> '{initial_guess}.pdf'?  {detail}  [y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return "stop", None
+    return ("yes", initial_guess) if answer in ("y", "yes") else ("no", None)
 
 
 def _check_cancelled():
@@ -2306,16 +2342,22 @@ def review_low_confidence_matches(results, output_directory, image_library, plan
     return results
 
 
-def review_unmatched_interactively(unmatched, output_directory, fingerprint_cache, scan_index, renaming_in_place):
+def review_unmatched_interactively(unmatched, output_directory, fingerprint_cache, scan_index, renaming_in_place, unclaimed_titles):
     """Post-scan step: for every file the automated pass couldn't
-    confidently identify, computes the single best guess anyway (see
-    best_guess_for_unmatched) and asks the user to confirm it one at a
-    time, rather than silently leaving all of them untouched. A 'y'
-    renames the file and seeds the fingerprint cache - a human
-    confirming a suggestion is a stronger signal than any automated
-    threshold, so it's trusted the same way a high-confidence automated
-    match is. Anything else (including Ctrl+C) skips that file; nothing
-    already confirmed is undone by skipping or cancelling the rest.
+    confidently identify, shows the PDF's own front page next to a
+    searchable list of every catalog title not already claimed by
+    another file this run (unclaimed_titles), and lets the user pick the
+    correct one directly - the single best guess computed anyway (see
+    best_guess_for_unmatched) is offered as a pre-selected convenience,
+    but isn't the only option, unlike a plain confirm/reject on that one
+    guess. This also means a file gets a real chance at review even when
+    best_guess_for_unmatched found nothing at all, which the old
+    guess-only flow silently skipped. A confirmed pick renames the file
+    and seeds the fingerprint cache - a human choosing a match is a
+    stronger signal than any automated threshold, so it's trusted the
+    same way a high-confidence automated match is. Anything else
+    (including Ctrl+C) skips that file; nothing already confirmed is
+    undone by skipping or cancelling the rest.
 
     When renaming in place, a confirmed file also gets a scan_index
     entry, the same as any other confirmed match - see
@@ -2326,7 +2368,7 @@ def review_unmatched_interactively(unmatched, output_directory, fingerprint_cach
         return 0
 
     print(f"\n{len(unmatched)} file(s) couldn't be confidently matched.")
-    if _confirm_yesno("Review best-guess suggestions for them one at a time?") != "yes":
+    if _confirm_yesno("Review them one at a time, picking the correct title from the catalog?") != "yes":
         print("Skipping review.")
         return 0
 
@@ -2362,23 +2404,41 @@ def review_unmatched_interactively(unmatched, output_directory, fingerprint_cach
         print("\n\nCancelled computing suggestions - nothing was renamed in this step.")
         return 0
 
+    with_guess = sum(1 for _fp, guess in guesses.values() if guess)
+    print(f"Have an automated guess for {with_guess} of {len(unmatched)} files - "
+          f"every file still gets a chance to pick from the catalog list.\n")
+
     confirmed = 0
     scan_index_changed = False
-    with_guess = [(pdf_file, fp, g) for pdf_file, (fp, g) in guesses.items() if g]
-    print(f"Have a suggestion for {len(with_guess)} of {len(unmatched)} files.\n")
+    # A mutable working copy - a title picked for one file is removed so
+    # it can't also be picked for a later file in this same review,
+    # exactly like the automated process-of-elimination layer already
+    # avoids assigning one catalog entry to two different files.
+    remaining_candidates = list(unclaimed_titles)
+    order = {pdf_file: i for i, (pdf_file, _fp) in enumerate(unmatched)}
 
-    for pdf_file, full_pdf_path, (suggested_title, score, source, box_art_path) in with_guess:
+    for pdf_file, (full_pdf_path, guess) in sorted(guesses.items(), key=lambda kv: order.get(kv[0], 0)):
         _check_control()
-        safe_title = "".join(c for c in suggested_title if c not in '<>:"/\\|?*').strip()
         preview_image = _extract_first_page_image(full_pdf_path)
-        detail = f"(guess from {source}, score {score:.2f})"
-        decision = _confirm_suggestion(pdf_file, safe_title, detail, box_art_path, preview_image)
+        if guess:
+            initial_guess, score, source, _box_art_path = guess
+            detail = f"(guess from {source}, score {score:.2f})"
+        else:
+            initial_guess, source, detail = None, None, "(no automated guess available)"
+        # A guess is only offered as pickable if it's still unclaimed -
+        # best_guess_for_unmatched doesn't itself check that, so without
+        # this a stale/duplicate guess could otherwise get pre-selected.
+        if initial_guess not in remaining_candidates:
+            initial_guess = None
+
+        decision, chosen_title = _pick_match(pdf_file, preview_image, remaining_candidates, initial_guess, detail)
         if decision == "stop":
             print("\nStopping review - anything already confirmed stays renamed.")
             break
-        if decision != "yes":
+        if decision != "yes" or not chosen_title:
             continue
 
+        safe_title = "".join(c for c in chosen_title if c not in '<>:"/\\|?*').strip()
         new_filename = f"{safe_title}.pdf"
         new_path = os.path.join(output_directory, new_filename)
         counter = 1
@@ -2393,9 +2453,15 @@ def review_unmatched_interactively(unmatched, output_directory, fingerprint_cach
             continue
 
         confirmed += 1
+        matched_via = (
+            f"Human-Confirmed Suggestion ({source})" if source and chosen_title == initial_guess
+            else "Human-Selected (from catalog list)"
+        )
         file_sha256 = hash_file_sha256(new_path)
         if file_sha256:
-            fingerprint_cache[file_sha256] = {"title": suggested_title, "matched_via": f"Human-Confirmed Suggestion ({source})"}
+            fingerprint_cache[file_sha256] = {"title": chosen_title, "matched_via": matched_via}
+        if chosen_title in remaining_candidates:
+            remaining_candidates.remove(chosen_title)
 
         if renaming_in_place and file_sha256:
             try:
@@ -2856,7 +2922,18 @@ def run_matching_agent():
         # rather than offered for review.
         if new_filename is None and pdf_file in plan_paths and not (match_method or "").startswith("Skipped -> exceeded")
     ]
-    review_unmatched_interactively(unmatched, OUTPUT_DIRECTORY, fingerprint_cache, scan_index, renaming_in_place)
+    # Every catalog title this run has already assigned to some file -
+    # the pool the manual review's picker list draws from is everything
+    # else, the same "not already claimed by anyone" pool the automated
+    # process-of-elimination layer uses, so a human picking one here
+    # can't accidentally create a duplicate the automated layers were
+    # specifically designed to avoid.
+    claimed_titles = {title for title in plan_targets.values() if title}
+    unclaimed_titles = sorted({
+        display_name for display_name in (resolve_display_name(item, image_library) for item in xml_items)
+        if display_name not in claimed_titles
+    })
+    review_unmatched_interactively(unmatched, OUTPUT_DIRECTORY, fingerprint_cache, scan_index, renaming_in_place, unclaimed_titles)
 
 
 if __name__ == "__main__":
