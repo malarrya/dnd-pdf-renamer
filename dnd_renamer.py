@@ -287,6 +287,11 @@ XML_PATH = None
 PDF_DIRECTORY = None
 IMAGE_DIRECTORY = None
 OUTPUT_DIRECTORY = None  # Safe to keep identical to PDF_DIRECTORY
+# Set by configure_paths() from a checkbox on the GUI setup/confirm
+# screen - True/False once that's run, or None if it never got the
+# chance to (the console-only fallback, with no such checkbox), in
+# which case run_matching_agent() still asks the old way itself.
+MANUAL_MODE = None
 
 # When frozen into a PyInstaller onefile exe, __file__ resolves inside the
 # temporary _MEIxxxx extraction dir (wiped after every run), not next to the
@@ -345,6 +350,12 @@ PROGRESS_HOOK = None
 CONFIRM_HOOK = None
 YESNO_HOOK = None
 PICKER_HOOK = None
+# Fire-and-forget (no return value expected) - tells the GUI to reveal
+# the run window, hidden for the run's whole duration in manual mode
+# (nothing for its own progress bar/log to usefully show while every
+# file is being identified by hand) until a human clicks "Back to
+# Automated Scan" mid-review, at which point it becomes relevant again.
+REVEAL_WINDOW_HOOK = None
 CANCEL_EVENT = threading.Event()
 PAUSE_EVENT = threading.Event()
 
@@ -407,7 +418,7 @@ def _confirm_yesno(message, allow_stop=False):
     return "yes" if answer in ("y", "yes") else "no"
 
 
-def _pick_match(pdf_file, preview_image, candidates, all_titles, initial_guess, detail):
+def _pick_match(pdf_file, full_pdf_path, candidates, all_titles, initial_guess, detail, keep_open, allow_switch_to_auto):
     """Asks a human to identify a file that couldn't be confidently
     matched automatically, by showing the PDF's own front page next to
     a searchable list of every catalog title not already claimed by
@@ -420,22 +431,40 @@ def _pick_match(pdf_file, preview_image, candidates, all_titles, initial_guess, 
     an opt-in expanded view for the rare case a claim was made in error
     (e.g. a genuine duplicate PDF) and the real match got excluded; a
     human can also type an exact title that isn't in the catalog at all.
-    Via PICKER_HOOK (a GUI picker dialog) if one is registered, else the
-    original console y/n prompt on the guess alone - there's no
-    practical console equivalent of browsing/searching a long list, so
+    keep_open tells a GUI dialog whether another file is coming right
+    after this one, so it can stay open and just update its own content
+    in place instead of visibly closing and reopening for every single
+    file - it's the caller's own loop position (is this the last item?)
+    since only it knows that. allow_switch_to_auto offers a "Back to
+    Automated Scan" escape hatch (see review_all_manually) - only
+    meaningful for a 100%-manual review, not the post-scan review of
+    whatever the automated pass already couldn't confidently match, so
+    review_unmatched_interactively leaves it False. Via PICKER_HOOK (a
+    GUI picker dialog) if one is registered, else the original console
+    y/n prompt on the guess alone - there's no practical console
+    equivalent of browsing/searching a long list or switching modes, so
     without a hook this only ever offers the automated guess, same as
     before. Returns ("yes", chosen_title) to rename the file to
-    chosen_title, ("no", None) to leave it unmatched, or ("stop", None)
-    to stop reviewing the rest."""
+    chosen_title, ("no", None) to leave it unmatched, ("stop", None) to
+    stop reviewing the rest, or ("switch_to_auto", None) to hand the
+    rest of the unreviewed files to the automated scan instead.
+
+    Passes full_pdf_path itself rather than an already-extracted preview
+    image - the GUI dialog shows immediately and loads that image itself
+    afterward, in the background, rather than making the whole dialog
+    (and the human waiting on it) block on that extraction first; the
+    console fallback below never used the image anyway."""
     if PICKER_HOOK is not None:
         try:
             return PICKER_HOOK({
                 "pdf_file": pdf_file,
-                "preview_image": preview_image,
+                "full_pdf_path": full_pdf_path,
                 "candidates": candidates,
                 "all_titles": all_titles,
                 "initial_guess": initial_guess,
                 "detail": detail,
+                "keep_open": keep_open,
+                "allow_switch_to_auto": allow_switch_to_auto,
             })
         except Exception:
             pass  # fall through to the console prompt as a safety net
@@ -542,7 +571,7 @@ def configure_paths():
     console prompts below otherwise. Sets the XML_PATH/PDF_DIRECTORY/
     IMAGE_DIRECTORY/OUTPUT_DIRECTORY globals used by the rest of the
     script."""
-    global XML_PATH, PDF_DIRECTORY, IMAGE_DIRECTORY, OUTPUT_DIRECTORY
+    global XML_PATH, PDF_DIRECTORY, IMAGE_DIRECTORY, OUTPUT_DIRECTORY, MANUAL_MODE
 
     try:
         from dnd_renamer_gui import confirm_paths_gui, configure_paths_gui
@@ -554,11 +583,17 @@ def configure_paths():
 
     if not reconfigure:
         if confirm_paths_gui is not None:
-            choice = confirm_paths_gui(config)
+            choice, manual_mode = confirm_paths_gui(config)
             if choice is None:
                 print("\nCancelled.")
                 sys.exit(1)
             reconfigure = choice == "change"
+            # Only counts if they're actually proceeding from this
+            # screen - "change" means they haven't finalized anything
+            # yet, so whatever they decide on the setup screen they're
+            # about to see instead is what should count.
+            if not reconfigure:
+                MANUAL_MODE = manual_mode
         else:
             print("Using saved settings:")
             print(f"  LaunchBox XML file : {config['xml_path']}")
@@ -577,11 +612,12 @@ def configure_paths():
 
         if configure_paths_gui is not None:
             print("\nOpening the setup window...\n")
-            new_config = configure_paths_gui(config, stale=stale)
+            new_config, manual_mode = configure_paths_gui(config, stale=stale)
             if new_config is None:
                 print("Cancelled.")
                 sys.exit(1)
             config = new_config
+            MANUAL_MODE = manual_mode
         else:
             print()
             print("=" * 50)
@@ -2381,6 +2417,135 @@ def review_low_confidence_matches(results, output_directory, image_library, plan
     return results
 
 
+def _review_files_with_picker(
+    items, output_directory, fingerprint_cache, scan_index, renaming_in_place, remaining_candidates, all_titles,
+    allow_switch_to_auto=False,
+):
+    """Shared per-file loop behind both review_unmatched_interactively
+    and review_all_manually: shows the picker dialog for each
+    (pdf_file, full_pdf_path, guess_or_None) entry in items, and on a
+    confirmed pick renames the file, seeds the fingerprint cache, and
+    (when renaming in place) updates the scan index - identical
+    bookkeeping either way, whether the pick confirmed an automated
+    guess or came from nothing but a human's own visual identification.
+    remaining_candidates is mutated in place as titles get claimed, so
+    two files in the same pass can never both claim the same title.
+    Returns (confirmed, switch_to_auto, remaining_pdf_files):
+    switch_to_auto is True only if allow_switch_to_auto was set and the
+    human chose to hand the rest over to the automated scan instead -
+    remaining_pdf_files is then every filename from that point on
+    (inclusive), for the caller to feed into the automated pipeline;
+    both are always False/empty otherwise."""
+    confirmed = 0
+    scan_index_changed = False
+    last_index = len(items) - 1
+    switch_to_auto = False
+    remaining_pdf_files = []
+
+    for i, (pdf_file, full_pdf_path, guess) in enumerate(items):
+        _check_control()
+        if guess:
+            initial_guess, score, source, _box_art_path = guess
+            detail = f"(guess from {source}, score {score:.2f})"
+        else:
+            initial_guess, source, detail = None, None, "(no automated guess available)"
+        # A guess is only offered as pickable if it's still unclaimed -
+        # best_guess_for_unmatched doesn't itself check that, so without
+        # this a stale/duplicate guess could otherwise get pre-selected.
+        if initial_guess not in remaining_candidates:
+            initial_guess = None
+
+        decision, chosen_title = _pick_match(
+            pdf_file, full_pdf_path, remaining_candidates, all_titles, initial_guess, detail,
+            i < last_index, allow_switch_to_auto,
+        )
+        if decision == "stop":
+            print("\nStopping review - anything already confirmed stays renamed.")
+            break
+        if decision == "switch_to_auto":
+            print(f"\nSwitching to the automated scan for the {len(items) - i} remaining file(s)...")
+            switch_to_auto = True
+            remaining_pdf_files = [item[0] for item in items[i:]]
+            break
+        if decision != "yes" or not chosen_title:
+            continue
+
+        safe_title = "".join(c for c in chosen_title if c not in '<>:"/\\|?*').strip()
+        new_filename = f"{safe_title}.pdf"
+        new_path = os.path.join(output_directory, new_filename)
+        counter = 1
+        while os.path.exists(new_path):
+            counter += 1
+            new_filename = f"{safe_title} ({counter}).pdf"
+            new_path = os.path.join(output_directory, new_filename)
+        try:
+            os.rename(full_pdf_path, new_path)
+        except Exception as e:
+            print(f"  Failed to rename: {e}")
+            continue
+
+        confirmed += 1
+        if source and chosen_title == initial_guess:
+            matched_via = f"Human-Confirmed Suggestion ({source})"
+        elif chosen_title in all_titles:
+            matched_via = "Human-Selected (from catalog list)"
+        else:
+            matched_via = "Human-Entered (custom title)"
+        file_sha256 = hash_file_sha256(new_path)
+        if file_sha256:
+            fingerprint_cache[file_sha256] = {"title": chosen_title, "matched_via": matched_via}
+        if chosen_title in remaining_candidates:
+            remaining_candidates.remove(chosen_title)
+
+        if renaming_in_place and file_sha256:
+            try:
+                stat = os.stat(new_path)
+            except OSError:
+                stat = None
+            if stat is not None:
+                entry = {"size": stat.st_size, "mtime": stat.st_mtime, "sha256": file_sha256}
+                if scan_index.get(new_filename) != entry:
+                    scan_index[new_filename] = entry
+                    scan_index_changed = True
+                if new_filename != pdf_file and scan_index.pop(pdf_file, None) is not None:
+                    scan_index_changed = True
+
+    if confirmed:
+        save_fingerprint_cache(CACHE_PATH, fingerprint_cache)
+        print(f"\nConfirmed {confirmed} rename(s) and updated the fingerprint cache.")
+    if scan_index_changed:
+        save_scan_index(SCAN_INDEX_PATH, scan_index)
+    return confirmed, switch_to_auto, remaining_pdf_files
+
+
+def review_all_manually(pdf_files, pdf_directory, output_directory, fingerprint_cache, scan_index, renaming_in_place, all_titles):
+    """Complete bypass of the automated scan: skips content analysis,
+    OCR, and cover-art matching entirely and shows every file in the
+    collection through the same picker dialog review_unmatched_
+    interactively uses for its hardest cases, with no pre-selected
+    guess at all - purely a human recognizing each file's own front
+    page and choosing (or typing) its real title. For a user who'd
+    rather identify everything by hand from the start than review the
+    automated scan's output afterward. Renames, fingerprint-cache
+    seeding, and (when renaming in place) scan_index updates all work
+    exactly the same as any other confirmed pick.
+
+    Unlike review_unmatched_interactively, this offers a "Back to
+    Automated Scan" escape hatch (allow_switch_to_auto=True) - a human
+    can hand whatever's left unreviewed back to the automated pipeline
+    at any point, rather than being stuck manually identifying an
+    entire large collection once they've started. Returns (confirmed,
+    switch_to_auto, remaining_pdf_files) - see _review_files_with_picker."""
+    if not pdf_files:
+        return 0, False, []
+    items = [(pdf_file, os.path.join(pdf_directory, pdf_file), None) for pdf_file in pdf_files]
+    remaining_candidates = list(all_titles)
+    return _review_files_with_picker(
+        items, output_directory, fingerprint_cache, scan_index, renaming_in_place, remaining_candidates, all_titles,
+        allow_switch_to_auto=True,
+    )
+
+
 def review_unmatched_interactively(unmatched, output_directory, fingerprint_cache, scan_index, renaming_in_place, unclaimed_titles, all_titles):
     """Post-scan step: for every file the automated pass couldn't
     confidently identify, shows the PDF's own front page next to a
@@ -2447,82 +2612,19 @@ def review_unmatched_interactively(unmatched, output_directory, fingerprint_cach
     print(f"Have an automated guess for {with_guess} of {len(unmatched)} files - "
           f"every file still gets a chance to pick from the catalog list.\n")
 
-    confirmed = 0
-    scan_index_changed = False
     # A mutable working copy - a title picked for one file is removed so
     # it can't also be picked for a later file in this same review,
     # exactly like the automated process-of-elimination layer already
     # avoids assigning one catalog entry to two different files.
     remaining_candidates = list(unclaimed_titles)
     order = {pdf_file: i for i, (pdf_file, _fp) in enumerate(unmatched)}
-
-    for pdf_file, (full_pdf_path, guess) in sorted(guesses.items(), key=lambda kv: order.get(kv[0], 0)):
-        _check_control()
-        preview_image = _extract_first_page_image(full_pdf_path)
-        if guess:
-            initial_guess, score, source, _box_art_path = guess
-            detail = f"(guess from {source}, score {score:.2f})"
-        else:
-            initial_guess, source, detail = None, None, "(no automated guess available)"
-        # A guess is only offered as pickable if it's still unclaimed -
-        # best_guess_for_unmatched doesn't itself check that, so without
-        # this a stale/duplicate guess could otherwise get pre-selected.
-        if initial_guess not in remaining_candidates:
-            initial_guess = None
-
-        decision, chosen_title = _pick_match(pdf_file, preview_image, remaining_candidates, all_titles, initial_guess, detail)
-        if decision == "stop":
-            print("\nStopping review - anything already confirmed stays renamed.")
-            break
-        if decision != "yes" or not chosen_title:
-            continue
-
-        safe_title = "".join(c for c in chosen_title if c not in '<>:"/\\|?*').strip()
-        new_filename = f"{safe_title}.pdf"
-        new_path = os.path.join(output_directory, new_filename)
-        counter = 1
-        while os.path.exists(new_path):
-            counter += 1
-            new_filename = f"{safe_title} ({counter}).pdf"
-            new_path = os.path.join(output_directory, new_filename)
-        try:
-            os.rename(full_pdf_path, new_path)
-        except Exception as e:
-            print(f"  Failed to rename: {e}")
-            continue
-
-        confirmed += 1
-        if source and chosen_title == initial_guess:
-            matched_via = f"Human-Confirmed Suggestion ({source})"
-        elif chosen_title in all_titles:
-            matched_via = "Human-Selected (from catalog list)"
-        else:
-            matched_via = "Human-Entered (custom title)"
-        file_sha256 = hash_file_sha256(new_path)
-        if file_sha256:
-            fingerprint_cache[file_sha256] = {"title": chosen_title, "matched_via": matched_via}
-        if chosen_title in remaining_candidates:
-            remaining_candidates.remove(chosen_title)
-
-        if renaming_in_place and file_sha256:
-            try:
-                stat = os.stat(new_path)
-            except OSError:
-                stat = None
-            if stat is not None:
-                entry = {"size": stat.st_size, "mtime": stat.st_mtime, "sha256": file_sha256}
-                if scan_index.get(new_filename) != entry:
-                    scan_index[new_filename] = entry
-                    scan_index_changed = True
-                if new_filename != pdf_file and scan_index.pop(pdf_file, None) is not None:
-                    scan_index_changed = True
-
-    if confirmed:
-        save_fingerprint_cache(CACHE_PATH, fingerprint_cache)
-        print(f"\nConfirmed {confirmed} rename(s) and updated the fingerprint cache.")
-    if scan_index_changed:
-        save_scan_index(SCAN_INDEX_PATH, scan_index)
-    return confirmed
+    items = [
+        (pdf_file, full_pdf_path, guess)
+        for pdf_file, (full_pdf_path, guess) in sorted(guesses.items(), key=lambda kv: order.get(kv[0], 0))
+    ]
+    return _review_files_with_picker(
+        items, output_directory, fingerprint_cache, scan_index, renaming_in_place, remaining_candidates, all_titles
+    )
 
 
 SCAN_TASK_TIMEOUT = 240  # seconds - generous: the slowest legitimate file
@@ -2701,6 +2803,37 @@ def run_matching_agent():
         == os.path.normcase(os.path.normpath(OUTPUT_DIRECTORY))
     )
     scan_index = load_scan_index(SCAN_INDEX_PATH) if renaming_in_place else {}
+    all_titles = sorted({resolve_display_name(item, image_library) for item in xml_items})
+
+    # Normally already decided by the checkbox on the GUI setup/confirm
+    # screen (see configure_paths()) - MANUAL_MODE is only ever still
+    # None here if that screen had no such checkbox to begin with (the
+    # console-only fallback, with no GUI at all), in which case this is
+    # the first and only chance to ask.
+    manual_mode = MANUAL_MODE if MANUAL_MODE is not None else _confirm_yesno(
+        "Skip the automated scan entirely and manually identify every file yourself instead?"
+    ) == "yes"
+
+    if pdf_files and manual_mode:
+        confirmed, switch_to_auto, remaining_files = review_all_manually(
+            pdf_files, PDF_DIRECTORY, OUTPUT_DIRECTORY, fingerprint_cache, scan_index, renaming_in_place, all_titles
+        )
+        if not switch_to_auto:
+            print("\n==================================================")
+            print(f"  Finished. Manually identified {confirmed} of {total_files} PDFs.")
+            print("==================================================")
+            _report_progress("Finished", total_files, total_files)
+            return
+        # The picker's "Back to Automated Scan" button - the automated
+        # pipeline below picks up exactly where manual review left off,
+        # on only the files nobody's hand-confirmed yet; anything already
+        # confirmed during manual review is untouched (already renamed,
+        # already in fingerprint_cache/scan_index).
+        print(f"\nSwitching back to the automated scan for the {len(remaining_files)} remaining file(s)...")
+        if REVEAL_WINDOW_HOOK:
+            REVEAL_WINDOW_HOOK()
+        pdf_files = remaining_files
+        total_files = len(pdf_files)
 
     skip_plans, to_scan_files = [], pdf_files
     if scan_index:
@@ -2971,7 +3104,6 @@ def run_matching_agent():
     # can't accidentally create a duplicate the automated layers were
     # specifically designed to avoid.
     claimed_titles = {title for title in plan_targets.values() if title}
-    all_titles = sorted({resolve_display_name(item, image_library) for item in xml_items})
     unclaimed_titles = [title for title in all_titles if title not in claimed_titles]
     review_unmatched_interactively(
         unmatched, OUTPUT_DIRECTORY, fingerprint_cache, scan_index, renaming_in_place, unclaimed_titles, all_titles

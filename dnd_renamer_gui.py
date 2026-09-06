@@ -124,10 +124,15 @@ def _center_on_parent(dialog, parent):
 
 def configure_paths_gui(config, stale=False):
     """Shows one browsable field per FIELDS entry, pre-filled from
-    `config`. Returns a new {config_key: value} dict on "Save and
-    Continue" (each value already validated), or None if the user
-    cancelled or closed the window."""
-    result = {"config": None}
+    `config`, plus a checkbox offering to skip the automated scan
+    entirely and manually identify every file by hand instead (see
+    review_all_manually in dnd_renamer.py). Returns
+    (new_config_or_None, manual_mode): new_config is a new
+    {config_key: value} dict on "Save and Continue" (each value already
+    validated), or None if the user cancelled or closed the window;
+    manual_mode is never saved to disk - it's a fresh choice every run,
+    not a durable setting like the paths are."""
+    result = {"config": None, "manual_mode": False}
 
     root = _new_window("D&D Renamer - Setup")
 
@@ -161,6 +166,13 @@ def configure_paths_gui(config, stale=False):
         )
         row += 1
 
+    manual_mode_var = tk.BooleanVar(value=False)
+    ttk.Checkbutton(
+        main, variable=manual_mode_var,
+        text="Manually identify every file myself (skip the automated scan)",
+    ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 8))
+    row += 1
+
     def on_continue():
         new_config = {}
         for key, label, _kind in FIELDS:
@@ -171,6 +183,7 @@ def configure_paths_gui(config, stale=False):
                 return
             new_config[key] = value
         result["config"] = new_config
+        result["manual_mode"] = manual_mode_var.get()
         root.destroy()
 
     button_row = ttk.Frame(main)
@@ -181,14 +194,19 @@ def configure_paths_gui(config, stale=False):
     root.protocol("WM_DELETE_WINDOW", root.destroy)
     _center(root)
     root.mainloop()
-    return result["config"]
+    return result["config"], result["manual_mode"]
 
 
 def confirm_paths_gui(config):
     """Shows the already-valid saved paths read-only, with a choice to
-    keep them or edit them. Returns "continue", "change", or None if the
-    user cancelled/closed the window."""
-    result = {"choice": None}
+    keep them or edit them, plus a checkbox offering to skip the
+    automated scan entirely and manually identify every file by hand
+    instead (see review_all_manually in dnd_renamer.py). Returns
+    (choice, manual_mode): choice is "continue", "change", or None if
+    the user cancelled/closed the window; manual_mode is never saved to
+    disk - it's a fresh choice every run, not a durable setting like
+    the paths are."""
+    result = {"choice": None, "manual_mode": False}
 
     root = _new_window("D&D Renamer - Setup")
 
@@ -204,12 +222,19 @@ def confirm_paths_gui(config):
             row=i, column=1, sticky="w", pady=0
         )
 
+    manual_mode_var = tk.BooleanVar(value=False)
+    ttk.Checkbutton(
+        main, variable=manual_mode_var,
+        text="Manually identify every file myself (skip the automated scan)",
+    ).grid(row=len(FIELDS) + 1, column=0, columnspan=2, sticky="w", pady=(6, 4))
+
     def choose(choice):
         result["choice"] = choice
+        result["manual_mode"] = manual_mode_var.get()
         root.destroy()
 
     button_row = ttk.Frame(main)
-    button_row.grid(row=len(FIELDS) + 1, column=0, columnspan=2, sticky="e", pady=(4, 0))
+    button_row.grid(row=len(FIELDS) + 2, column=0, columnspan=2, sticky="e", pady=(4, 0))
     ttk.Button(button_row, text="Change Settings...", command=lambda: choose("change")).grid(
         row=0, column=0, padx=(0, 8)
     )
@@ -218,7 +243,7 @@ def confirm_paths_gui(config):
     root.protocol("WM_DELETE_WINDOW", root.destroy)
     _center(root)
     root.mainloop()
-    return result["choice"]
+    return result["choice"], result["manual_mode"]
 
 
 class _QueueWriter:
@@ -459,7 +484,19 @@ def _make_picker_hook(q):
     return picker_hook
 
 
-def _show_picker_dialog(root, request):
+def _make_reveal_hook(q):
+    """Returns the function installed as dnd_renamer.REVEAL_WINDOW_HOOK.
+    Fire-and-forget (unlike the other hooks) - nothing on the worker
+    thread is waiting on a reply, so no result_holder/Event round-trip
+    is needed, just a queue item for poll() to act on next tick."""
+
+    def reveal_hook():
+        q.put(("reveal_window",))
+
+    return reveal_hook
+
+
+def _show_picker_dialog(root, request, picker_ctx, dnd_renamer):
     """Modal identification dialog for one file that couldn't be
     confidently matched automatically: the PDF's own front page next to
     a searchable, scrollable list of every catalog title not already
@@ -472,174 +509,378 @@ def _show_picker_dialog(root, request):
     another file this run - for the rare case a claim was made in error
     (e.g. a genuine duplicate PDF) and the real match got excluded; a
     separate field lets a human type an exact title that isn't in the
-    catalog at all. Runs on the main thread (a Toplevel child of the run
-    window, not a fresh Tk() root - it must coexist with that window,
-    not replace it). Returns (decision, chosen_title): ("yes", title),
-    ("no", None), or ("stop", None)."""
+    catalog at all.
+
+    picker_ctx is a dict the caller keeps for the whole review session
+    (built once, empty, before the first call) - the underlying window
+    is built only on the first call and reused after that, just having
+    its content (image, info text, candidate list, both text fields)
+    refreshed for each new file, rather than visibly closing and
+    reopening for every single one. request["keep_open"] says whether
+    another file is coming right after this one: if so the window stays
+    open once a decision is made; otherwise (or on "stop") it actually
+    closes now. Closing the window via its own X while it's the kind
+    that can stay open has to mean "stop the whole review" - not "skip
+    this file and pop right back up for the next one" - so that's what
+    it does here.
+
+    Runs on the main thread (a Toplevel child of the run window, not a
+    fresh Tk() root - it must coexist with that window, not replace
+    it). Returns (decision, chosen_title): ("yes", title), ("no", None),
+    ("stop", None), or - only when request["allow_switch_to_auto"] is
+    set and its button is shown - ("switch_to_auto", None). A separate
+    "Close Program" button, always shown, bypasses this return path
+    entirely and exits the whole process directly via _force_close.
+
+    request carries full_pdf_path rather than an already-extracted
+    preview image - extracting that image (reading the whole PDF,
+    decoding an embedded page-1 image) is exactly the kind of per-file
+    work that used to delay this dialog's very first appearance, since
+    the caller (_review_files_with_picker) previously did it BEFORE
+    ever sending the request over. This dialog shows immediately with a
+    "Loading preview..." placeholder instead, and loads the real image
+    on a background thread, applying it once ready via a small,
+    dialog-local queue+after() poll (preview_queue/check_preview, set up
+    once below) - deliberately its OWN queue rather than reusing poll()'s
+    shared one: that outer poll() can't drain anything else while it's
+    itself sitting inside this call (Python's call stack, not just Tk's
+    event loop, is blocked on wait_variable below), so a "ready" signal
+    posted there would never be seen until after the human had already
+    decided - too late to matter. Tk's after() timers, unlike the queue
+    they read from, DO keep firing correctly during a nested
+    wait_variable loop like this dialog's own, which is what makes
+    check_preview's approach work at all. A load_token guards against a
+    slow load for a file the human has since moved past (Skip/Confirm/
+    Stop/switch clicked before it finished) overwriting a later file's
+    already-correct image."""
     try:
         from PIL import Image, ImageTk
         pil_available = True
     except ImportError:
         pil_available = False
 
-    result = {"decision": "no", "chosen_title": None}
-    photo_refs = []  # keep the PhotoImage alive for the dialog's lifetime - Tk drops a garbage-collected one silently, leaving a blank label
+    THUMB_SIZE = (160, 210)
 
-    dialog = tk.Toplevel(root)
-    dialog.title("Identify This File")
-    dialog.transient(root)
-    # At least as wide as the main run window, and tall enough that
-    # every row of content - including the show-all checkbox and the
-    # custom-title field below the list - actually fits without
-    # clipping the buttons at the bottom (measured empirically: this
-    # dialog's natural packed height is ~585px). minsize is set to the
-    # same floor so manually shrinking the window can't recreate that
-    # same clipping; it can still be made bigger still if wanted.
-    dialog.geometry("760x600")
-    dialog.minsize(760, 600)
+    if picker_ctx.get("dialog") is None:
+        dialog = tk.Toplevel(root)
+        dialog.title("Identify This File")
+        # .transient() ties this dialog's minimize/restore behavior to
+        # root and keeps it off the taskbar as its own entry - wanted
+        # whenever root is actually on screen, but reproduced and
+        # confirmed as actively harmful during a 100%-manual run: root
+        # sits withdrawn for that whole run (see run_scan_window), and
+        # on Windows a Toplevel made transient to an ALREADY-withdrawn
+        # master itself gets stuck in the withdrawn state - deiconify()
+        # afterward does not undo it. Skipping .transient() in that case
+        # is what actually gets this dialog on screen at all; grab_set()
+        # and _center_on_parent() below still work fine without it.
+        if root.state() != "withdrawn":
+            dialog.transient(root)
+        # At least as wide as the main run window, and tall enough that
+        # every row of content - including the show-all checkbox and the
+        # custom-title field below the list - actually fits without
+        # clipping the buttons at the bottom (measured empirically: this
+        # dialog's natural packed height is ~585px). minsize is set to the
+        # same floor so manually shrinking the window can't recreate that
+        # same clipping; it can still be made bigger still if wanted.
+        dialog.geometry("760x600")
+        dialog.minsize(760, 600)
 
-    main = ttk.Frame(dialog, padding=10)
-    main.pack(fill="both", expand=True)
+        main = ttk.Frame(dialog, padding=10)
+        main.pack(fill="both", expand=True)
 
-    info = (
+        info_var = tk.StringVar()
+        ttk.Label(main, textvariable=info_var, justify="left").pack(anchor="w", pady=(0, 8))
+
+        body = ttk.Frame(main)
+        body.pack(fill="both", expand=True)
+
+        image_col = ttk.Frame(body)
+        image_col.pack(side="left", padx=(0, 10), anchor="n")
+        ttk.Label(image_col, text="This file's own\nfront page", font=("", 8, "bold")).pack()
+        image_label = ttk.Label(image_col, justify="center", anchor="center")
+        image_label.pack()
+
+        list_col = ttk.Frame(body)
+        list_col.pack(side="left", fill="both", expand=True)
+
+        search_var = tk.StringVar()
+        search_entry = ttk.Entry(list_col, textvariable=search_var)
+        search_entry.pack(fill="x", pady=(0, 4))
+
+        show_all_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            list_col, variable=show_all_var,
+            text="Also show titles already used by another file this run",
+            command=lambda: populate(search_var.get()),
+        ).pack(anchor="w", pady=(0, 4))
+
+        list_frame = ttk.Frame(list_col)
+        list_frame.pack(fill="both", expand=True)
+        scrollbar = ttk.Scrollbar(list_frame, orient="vertical")
+        listbox = tk.Listbox(list_frame, height=22, width=60, exportselection=False, yscrollcommand=scrollbar.set)
+        scrollbar.configure(command=listbox.yview)
+        listbox.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        custom_row = ttk.Frame(list_col)
+        custom_row.pack(fill="x", pady=(6, 0))
+        ttk.Label(custom_row, text="Or type the exact title yourself:").pack(anchor="w")
+        custom_entry_row = ttk.Frame(custom_row)
+        custom_entry_row.pack(fill="x", pady=(2, 0))
+        custom_var = tk.StringVar()
+        custom_entry = ttk.Entry(custom_entry_row, textvariable=custom_var)
+        custom_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+
+        # Bumped on every decision - wait_variable blocks on a change to
+        # this, not on window destruction, so the window can stay open
+        # and just get reused for the next file instead of being torn
+        # down and rebuilt every time.
+        decision_event_var = tk.IntVar(value=0)
+
+        # Per-request data populate()/choose() need, refreshed each call
+        # rather than recaptured in a fresh closure each time.
+        req_state = {
+            "photo_refs": [],  # keeps each PhotoImage alive - Tk drops a garbage-collected one silently, leaving a blank label
+            "unclaimed_candidates": [],
+            "all_titles": [],
+            "initial_guess": None,
+            "keep_open": False,
+            "display_to_title": {},
+            "result": {"decision": "no", "chosen_title": None},
+        }
+
+        # Shown the instant a decision is made and another file is
+        # coming right after (req_state["keep_open"]) - there's a real
+        # gap between the click and the next file's content actually
+        # being ready (renaming the file, extracting its own front
+        # page's preview image, etc. all happen before it), and without
+        # this a human has no visible sign their click even registered.
+        loading_label = ttk.Label(
+            dialog, text="Loading next file...", font=("", 11, "bold"),
+            background="#ffffcc", relief="solid", borderwidth=1, padding=12,
+        )
+
+        def show_loading():
+            confirm_button.configure(state="disabled")
+            skip_button.configure(state="disabled")
+            stop_button.configure(state="disabled")
+            custom_button.configure(state="disabled")
+            loading_label.place(relx=0.5, rely=0.5, anchor="center")
+            loading_label.lift()
+            dialog.update_idletasks()
+
+        def update_confirm_state(*_a):
+            confirm_button.configure(state="normal" if listbox.curselection() else "disabled")
+
+        def update_custom_state(*_a):
+            custom_button.configure(state="normal" if custom_var.get().strip() else "disabled")
+
+        def populate(filter_text=""):
+            listbox.delete(0, "end")
+            req_state["display_to_title"].clear()
+            unclaimed_candidates = req_state["unclaimed_candidates"]
+            all_titles = req_state["all_titles"]
+            initial_guess = req_state["initial_guess"]
+            pool = all_titles if show_all_var.get() else unclaimed_candidates
+            filter_lower = filter_text.strip().lower()
+            shown = [t for t in pool if filter_lower in t.lower()] if filter_lower else list(pool)
+            for title in shown:
+                display = title if title in unclaimed_candidates else f"{title}  (already assigned)"
+                req_state["display_to_title"][display] = title
+                listbox.insert("end", display)
+            if not filter_text and initial_guess and initial_guess in shown:
+                idx = shown.index(initial_guess)
+                listbox.selection_set(idx)
+                listbox.see(idx)
+            update_confirm_state()
+
+        def on_search_change(*_a):
+            populate(search_var.get())
+
+        search_var.trace_add("write", on_search_change)
+        custom_var.trace_add("write", update_custom_state)
+
+        def choose(decision):
+            if decision == "yes":
+                selection = listbox.curselection()
+                if not selection:
+                    return
+                req_state["result"]["chosen_title"] = req_state["display_to_title"][listbox.get(selection[0])]
+            req_state["result"]["decision"] = decision
+            # Stopping, switching to the automated scan, or this being
+            # the last file either way, all mean the window is about to
+            # close/hide rather than show anything else - showing
+            # "Loading..." right before that would just be a misleading
+            # flicker.
+            if decision not in ("stop", "switch_to_auto") and req_state["keep_open"]:
+                show_loading()
+            decision_event_var.set(decision_event_var.get() + 1)
+
+        def choose_custom():
+            title = custom_var.get().strip()
+            if not title:
+                return
+            req_state["result"]["chosen_title"] = title
+            req_state["result"]["decision"] = "yes"
+            if req_state["keep_open"]:
+                show_loading()
+            decision_event_var.set(decision_event_var.get() + 1)
+
+        listbox.bind("<<ListboxSelect>>", update_confirm_state)
+        listbox.bind("<Double-Button-1>", lambda _e: choose("yes"))
+        custom_entry.bind("<Return>", lambda _e: choose_custom())
+
+        custom_button = ttk.Button(custom_entry_row, text="Use This Name", command=choose_custom, state="disabled")
+        custom_button.pack(side="left")
+
+        button_row = ttk.Frame(main)
+        button_row.pack(fill="x", pady=(10, 0))
+        stop_button = ttk.Button(button_row, text="Stop Reviewing", command=lambda: choose("stop"))
+        stop_button.pack(side="left")
+        # Always available - an immediate, unconditional full-process
+        # exit, not a "return control to the picker loop" decision like
+        # every other button here, so it bypasses choose()/
+        # decision_event_var entirely rather than waiting for the
+        # worker thread to notice a decision and unwind on its own.
+        close_program_button = ttk.Button(
+            button_row, text="Close Program", command=lambda: _force_close(dnd_renamer, root)
+        )
+        close_program_button.pack(side="left", padx=(8, 0))
+        if request.get("allow_switch_to_auto"):
+            ttk.Button(
+                button_row, text="Back to Automated Scan", command=lambda: choose("switch_to_auto")
+            ).pack(side="left", padx=(8, 0))
+        skip_button = ttk.Button(button_row, text="Skip This File", command=lambda: choose("no"))
+        skip_button.pack(side="right", padx=(8, 0))
+        confirm_button = ttk.Button(button_row, text="Confirm Selected", command=lambda: choose("yes"))
+        confirm_button.pack(side="right")
+
+        dialog.protocol("WM_DELETE_WINDOW", lambda: choose("stop"))
+        _center_on_parent(dialog, root)
+        dialog.grab_set()
+
+        def apply_preview(token, img):
+            # Discarded if the human already moved on to a different
+            # file (Skip/Confirm/Stop/switch) before this load finished -
+            # req_state["load_token"] only ever matches the request this
+            # specific load was for.
+            if req_state.get("load_token") != token:
+                return
+            photo = None
+            if img is not None:
+                try:
+                    thumb = img.copy()
+                    thumb.thumbnail(THUMB_SIZE)
+                    photo = ImageTk.PhotoImage(thumb)
+                except Exception:
+                    photo = None
+            if photo is not None:
+                req_state["photo_refs"].append(photo)
+                image_label.configure(image=photo, text="", relief="flat", borderwidth=0, width=0)
+            else:
+                image_label.configure(
+                    image="", text="(no preview\navailable)",
+                    relief="solid", borderwidth=1, width=18,
+                )
+
+        # A dedicated queue rather than reusing the run window's shared
+        # one (see the docstring above for why) - fed by a background
+        # thread per file (started below, per call) and drained here by
+        # a self-rescheduling after() loop, started once and left
+        # running for the dialog's whole lifetime.
+        preview_queue = queue.Queue()
+
+        def check_preview():
+            try:
+                while True:
+                    try:
+                        token, img = preview_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    apply_preview(token, img)
+            finally:
+                if dialog.winfo_exists():
+                    dialog.after(50, check_preview)
+
+        dialog.after(50, check_preview)
+
+        picker_ctx.update({
+            "dialog": dialog,
+            "info_var": info_var,
+            "image_label": image_label,
+            "search_var": search_var,
+            "custom_var": custom_var,
+            "search_entry": search_entry,
+            "populate": populate,
+            "decision_event_var": decision_event_var,
+            "req_state": req_state,
+            "loading_label": loading_label,
+            "confirm_button": confirm_button,
+            "skip_button": skip_button,
+            "stop_button": stop_button,
+            "apply_preview": apply_preview,
+            "preview_queue": preview_queue,
+        })
+    else:
+        dialog = picker_ctx["dialog"]
+
+    # --- (re)populate everything for this specific file ---
+    req_state = picker_ctx["req_state"]
+    req_state["unclaimed_candidates"] = request["candidates"]
+    req_state["all_titles"] = request["all_titles"]
+    req_state["initial_guess"] = request.get("initial_guess")
+    req_state["keep_open"] = request.get("keep_open", False)
+    req_state["result"] = {"decision": "no", "chosen_title": None}
+
+    # Hide the loading overlay from the previous decision (if any) and
+    # re-enable the buttons it disabled - Confirm/Use This Name get
+    # their own correct enabled state back further down, once the
+    # search/custom fields are cleared and the list is repopulated.
+    picker_ctx["loading_label"].place_forget()
+    picker_ctx["skip_button"].configure(state="normal")
+    picker_ctx["stop_button"].configure(state="normal")
+
+    picker_ctx["info_var"].set(
         f"Currently named:  {request['pdf_file']}\n"
         f"{request['detail']}\n\n"
         f"Select the correct title below (type to search), type it in yourself, or Skip if none match."
     )
-    ttk.Label(main, text=info, justify="left").pack(anchor="w", pady=(0, 8))
+    picker_ctx["search_var"].set("")
+    picker_ctx["custom_var"].set("")
 
-    body = ttk.Frame(main)
-    body.pack(fill="both", expand=True)
+    req_state["load_token"] = req_state.get("load_token", 0) + 1
+    my_token = req_state["load_token"]
+    picker_ctx["image_label"].configure(
+        image="", text="Loading preview...", relief="solid", borderwidth=1, width=18,
+    )
 
-    image_col = ttk.Frame(body)
-    image_col.pack(side="left", padx=(0, 10), anchor="n")
-    ttk.Label(image_col, text="This file's own\nfront page", font=("", 8, "bold")).pack()
-    THUMB_SIZE = (160, 210)
-    img = request["preview_image"]
-    if img is not None and pil_available:
-        try:
-            img = img.copy()
-            img.thumbnail(THUMB_SIZE)
-            photo = ImageTk.PhotoImage(img)
-            photo_refs.append(photo)
-            ttk.Label(image_col, image=photo).pack()
-        except Exception:
-            img = None
-    else:
+    preview_queue = picker_ctx["preview_queue"]
+
+    def load_preview():
         img = None
-    if img is None:
-        placeholder = ttk.Label(
-            image_col, text="(no preview\navailable)", justify="center", anchor="center",
-            relief="solid", borderwidth=1, width=18,
-        )
-        placeholder.pack(ipady=THUMB_SIZE[1] // 2 - 15)
+        if pil_available:
+            try:
+                img = dnd_renamer._extract_first_page_image(request["full_pdf_path"])
+            except Exception:
+                img = None
+        preview_queue.put((my_token, img))
 
-    list_col = ttk.Frame(body)
-    list_col.pack(side="left", fill="both", expand=True)
+    threading.Thread(target=load_preview, daemon=True).start()
 
-    search_var = tk.StringVar()
-    search_entry = ttk.Entry(list_col, textvariable=search_var)
-    search_entry.pack(fill="x", pady=(0, 4))
+    picker_ctx["populate"]()
 
-    show_all_var = tk.BooleanVar(value=False)
-    ttk.Checkbutton(
-        list_col, variable=show_all_var,
-        text="Also show titles already used by another file this run",
-        command=lambda: populate(search_var.get()),
-    ).pack(anchor="w", pady=(0, 4))
+    dialog.deiconify()
+    dialog.lift()
+    picker_ctx["search_entry"].focus_set()
 
-    list_frame = ttk.Frame(list_col)
-    list_frame.pack(fill="both", expand=True)
-    scrollbar = ttk.Scrollbar(list_frame, orient="vertical")
-    listbox = tk.Listbox(list_frame, height=22, width=60, exportselection=False, yscrollcommand=scrollbar.set)
-    scrollbar.configure(command=listbox.yview)
-    listbox.pack(side="left", fill="both", expand=True)
-    scrollbar.pack(side="right", fill="y")
+    dialog.wait_variable(picker_ctx["decision_event_var"])
 
-    custom_row = ttk.Frame(list_col)
-    custom_row.pack(fill="x", pady=(6, 0))
-    ttk.Label(custom_row, text="Or type the exact title yourself:").pack(anchor="w")
-    custom_entry_row = ttk.Frame(custom_row)
-    custom_entry_row.pack(fill="x", pady=(2, 0))
-    custom_var = tk.StringVar()
-    custom_entry = ttk.Entry(custom_entry_row, textvariable=custom_var)
-    custom_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
-
-    unclaimed_candidates = request["candidates"]
-    all_titles = request["all_titles"]
-    initial_guess = request.get("initial_guess")
-    # Maps what's actually shown in the listbox back to the real title -
-    # an already-claimed entry (only visible with show_all_var checked)
-    # gets a suffix noting that, which has to be stripped back off
-    # before it's usable as a real catalog title.
-    display_to_title = {}
-
-    def update_confirm_state(*_a):
-        confirm_button.configure(state="normal" if listbox.curselection() else "disabled")
-
-    def update_custom_state(*_a):
-        custom_button.configure(state="normal" if custom_var.get().strip() else "disabled")
-
-    def populate(filter_text=""):
-        listbox.delete(0, "end")
-        display_to_title.clear()
-        pool = all_titles if show_all_var.get() else unclaimed_candidates
-        filter_lower = filter_text.strip().lower()
-        shown = [t for t in pool if filter_lower in t.lower()] if filter_lower else list(pool)
-        for title in shown:
-            display = title if title in unclaimed_candidates else f"{title}  (already assigned)"
-            display_to_title[display] = title
-            listbox.insert("end", display)
-        if not filter_text and initial_guess and initial_guess in shown:
-            idx = shown.index(initial_guess)
-            listbox.selection_set(idx)
-            listbox.see(idx)
-        update_confirm_state()
-
-    def on_search_change(*_a):
-        populate(search_var.get())
-
-    search_var.trace_add("write", on_search_change)
-    custom_var.trace_add("write", update_custom_state)
-
-    def choose(decision):
-        if decision == "yes":
-            selection = listbox.curselection()
-            if not selection:
-                return
-            result["chosen_title"] = display_to_title[listbox.get(selection[0])]
-        result["decision"] = decision
+    result = req_state["result"]
+    if result["decision"] in ("stop", "switch_to_auto") or not request.get("keep_open", False):
         dialog.destroy()
+        picker_ctx.clear()
 
-    def choose_custom():
-        title = custom_var.get().strip()
-        if not title:
-            return
-        result["chosen_title"] = title
-        result["decision"] = "yes"
-        dialog.destroy()
-
-    listbox.bind("<<ListboxSelect>>", update_confirm_state)
-    listbox.bind("<Double-Button-1>", lambda _e: choose("yes"))
-    custom_entry.bind("<Return>", lambda _e: choose_custom())
-
-    custom_button = ttk.Button(custom_entry_row, text="Use This Name", command=choose_custom, state="disabled")
-    custom_button.pack(side="left")
-
-    button_row = ttk.Frame(main)
-    button_row.pack(fill="x", pady=(10, 0))
-    ttk.Button(button_row, text="Stop Reviewing", command=lambda: choose("stop")).pack(side="left")
-    ttk.Button(button_row, text="Skip This File", command=lambda: choose("no")).pack(side="right", padx=(8, 0))
-    confirm_button = ttk.Button(button_row, text="Confirm Selected", command=lambda: choose("yes"))
-    confirm_button.pack(side="right")
-
-    populate()
-
-    dialog.protocol("WM_DELETE_WINDOW", lambda: choose("no"))
-    _center_on_parent(dialog, root)
-    dialog.grab_set()
-    search_entry.focus_set()
-    dialog.wait_window()
     return result["decision"], result["chosen_title"]
 
 
@@ -728,6 +969,7 @@ def run_scan_window(run_fn, dnd_renamer):
     dnd_renamer.CONFIRM_HOOK = _make_confirm_hook(q)
     dnd_renamer.YESNO_HOOK = _make_yesno_hook(q)
     dnd_renamer.PICKER_HOOK = _make_picker_hook(q)
+    dnd_renamer.REVEAL_WINDOW_HOOK = _make_reveal_hook(q)
 
     prev_sigint_handler = None
     try:
@@ -810,6 +1052,7 @@ def run_scan_window(run_fn, dnd_renamer):
     log_state = {"pending_clear": False}
     ui_state = {"paused": False, "base_status": "Starting..."}
     run_state = {"done": False}
+    picker_ctx = {}
 
     def append_log(s):
         log_text.configure(state="normal")
@@ -873,6 +1116,17 @@ def run_scan_window(run_fn, dnd_renamer):
                         pause_button.configure(state="disabled")
                         cancel_button.configure(state="disabled")
                         close_button.configure(state="normal")
+                        # A 100%-manual run that finishes WITHOUT ever
+                        # switching back to automated (the only other
+                        # path that reveals this window) would otherwise
+                        # stay withdrawn forever with no visible way to
+                        # reach the now-enabled Close button - the
+                        # picker dialog that could reach it is already
+                        # gone by this point (it closes as soon as the
+                        # last file's reviewed).
+                        if not root.winfo_viewable():
+                            root.deiconify()
+                            _center(root)
                     elif kind == "confirm_request":
                         request, result_holder, event = payload
                         try:
@@ -891,9 +1145,21 @@ def run_scan_window(run_fn, dnd_renamer):
                     elif kind == "picker_request":
                         request, result_holder, event = payload
                         try:
-                            result_holder["decision"], result_holder["chosen_title"] = _show_picker_dialog(root, request)
+                            result_holder["decision"], result_holder["chosen_title"] = _show_picker_dialog(
+                                root, request, picker_ctx, dnd_renamer
+                            )
                         finally:
                             event.set()
+                    elif kind == "reveal_window":
+                        # The run window was hidden for the whole
+                        # duration of a 100%-manual review (see
+                        # run_scan_window's withdraw() below) since it
+                        # had nothing useful to show while every file
+                        # was being identified by hand - "Back to
+                        # Automated Scan" makes its progress bar/log
+                        # relevant again.
+                        root.deiconify()
+                        _center(root)
                 except Exception:
                     # A single bad item (or an exception from tkinter
                     # itself under load) must never silently kill this
@@ -936,6 +1202,17 @@ def run_scan_window(run_fn, dnd_renamer):
 
     root.protocol("WM_DELETE_WINDOW", on_close)
     _center(root)
+    # A 100%-manual run has nothing useful to show here - no automated
+    # progress, no log lines worth watching - until/unless the picker's
+    # "Back to Automated Scan" button hands remaining files back to the
+    # automated pipeline, at which point REVEAL_WINDOW_HOOK (wired above)
+    # brings it back. Confirmed safe even though root is withdrawn for
+    # the picker Toplevel's whole lifetime: a withdrawn root's Toplevel
+    # child still paints, still takes real clicks, and deiconify()ing
+    # the root afterward works correctly (empirically re-verified this
+    # session after an earlier, mistaken belief it didn't).
+    if dnd_renamer.MANUAL_MODE:
+        root.withdraw()
 
     if log_file_path is not None:
         print(f"Full log for this run: {log_file_path}\n")
@@ -949,6 +1226,7 @@ def run_scan_window(run_fn, dnd_renamer):
     dnd_renamer.CONFIRM_HOOK = None
     dnd_renamer.YESNO_HOOK = None
     dnd_renamer.PICKER_HOOK = None
+    dnd_renamer.REVEAL_WINDOW_HOOK = None
     if prev_sigint_handler is not None:
         try:
             signal.signal(signal.SIGINT, prev_sigint_handler)
