@@ -91,6 +91,27 @@ run (for the rare case a claim was made in error, like a genuine
 duplicate PDF). The dialog is taller (760x600) to fit both without
 clipping the buttons at the bottom.
 
+[**v1.4.0**](https://github.com/malarrya/dnd-pdf-renamer/releases/tag/v1.4.0)
+lets a **full** scan (re-verify every file's content from scratch) also
+offer to clear the fingerprint cache and rebuild it fresh from that run,
+instead of silently trusting instant answers cached from a previous run
+even when you asked for a from-scratch re-check. The existing cache is
+backed up first (`dnd_renamer_cache.json.bak`), so this isn't a one-way
+door if the run gets cancelled partway through.
+
+[**v1.5.0**](https://github.com/malarrya/dnd-pdf-renamer/releases/tag/v1.5.0)
+adds a 100%-manual identification mode: a checkbox on the setup/confirm
+screen skips the automated scan entirely and hands every file straight
+to the searchable-title picker, one at a time. That picker dialog now
+also stays open and reuses itself across files instead of closing and
+reopening for each one, opens immediately rather than waiting on that
+file's preview image first, and has two new buttons - **Back to
+Automated Scan** (hands whatever's left unreviewed to the automated
+pipeline instead) and **Close Program** (exits immediately). The run
+window itself hides for the duration of a manual-only review, since it
+has nothing useful to show, and reappears if you switch back to
+automated or the review finishes.
+
 If you installed v1.0.0 and hit an infinite "Press Enter to continue" loop
 that kept re-spawning itself, update to v1.0.1 or later - that version was
 missing `multiprocessing.freeze_support()`, so a worker process would fail
