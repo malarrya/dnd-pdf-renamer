@@ -115,6 +115,15 @@ automated or the review finishes.
 [**v1.5.1**](https://github.com/malarrya/dnd-pdf-renamer/releases/tag/v1.5.1)
 is docs-only - no functional changes from v1.5.0.
 
+[**v1.6.0**](https://github.com/malarrya/dnd-pdf-renamer/releases/tag/v1.6.0)
+adds visibility into how many files didn't need renaming at all: the
+automated scan's finished summary now notes how many matched files
+were already correctly named, and the 100%-manual picker shows a
+one-time note when it opens if some files' current filenames already
+exactly match a catalog title - a filename-only heads-up, not a claim
+those files are verified correct, since manual mode does no content
+analysis of its own.
+
 If you installed v1.0.0 and hit an infinite "Press Enter to continue" loop
 that kept re-spawning itself, update to v1.0.1 or later - that version was
 missing `multiprocessing.freeze_support()`, so a worker process would fail
