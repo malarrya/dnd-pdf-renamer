@@ -77,6 +77,12 @@ with a searchable picker - see [Usage](#usage) below for what that
 looks like. A file with no automated guess at all now gets a real
 chance at manual review too, instead of being silently skipped.
 
+If you installed v1.2.0, update to
+[**v1.2.1**](https://github.com/malarrya/dnd-pdf-renamer/releases/tag/v1.2.1)
+or later - that version's picker dialog opened at a cramped default
+size that truncated longer catalog titles; it now opens as big as the
+main run window (760x445) and is resizable if that's still not enough.
+
 If you installed v1.0.0 and hit an infinite "Press Enter to continue" loop
 that kept re-spawning itself, update to v1.0.1 or later - that version was
 missing `multiprocessing.freeze_support()`, so a worker process would fail
