@@ -483,6 +483,12 @@ def _show_picker_dialog(root, request):
     dialog = tk.Toplevel(root)
     dialog.title("Identify This File")
     dialog.transient(root)
+    # Matches the main run window's own size - the candidate list needs
+    # real room to show a full title without truncating it, and this is
+    # resizable (unlike the run window's own pinned size) so it can be
+    # made bigger still if a user wants more.
+    dialog.geometry("760x445")
+    dialog.minsize(600, 350)
 
     main = ttk.Frame(dialog, padding=10)
     main.pack(fill="both", expand=True)
@@ -530,7 +536,7 @@ def _show_picker_dialog(root, request):
     list_frame = ttk.Frame(list_col)
     list_frame.pack(fill="both", expand=True)
     scrollbar = ttk.Scrollbar(list_frame, orient="vertical")
-    listbox = tk.Listbox(list_frame, height=12, width=42, exportselection=False, yscrollcommand=scrollbar.set)
+    listbox = tk.Listbox(list_frame, height=22, width=60, exportselection=False, yscrollcommand=scrollbar.set)
     scrollbar.configure(command=listbox.yview)
     listbox.pack(side="left", fill="both", expand=True)
     scrollbar.pack(side="right", fill="y")
