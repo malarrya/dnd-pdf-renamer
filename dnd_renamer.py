@@ -945,6 +945,39 @@ def prompt_scan_mode(skip_candidate_count, total_count):
         print("  Please enter 'f' or 'i'.\n")
 
 
+def _offer_fresh_fingerprint_cache(fingerprint_cache):
+    """Only offered right after choosing a full scan: lets a human
+    discard every previously-confirmed identification and have this run
+    rebuild the fingerprint cache from scratch, rather than letting
+    anything cached before instantly resolve a file a full scan is
+    otherwise supposed to re-verify from its actual content. Backs up
+    the existing cache file first (CACHE_PATH + '.bak') so this isn't a
+    one-way door if the run gets cancelled partway with little rebuilt
+    yet. Mutates fingerprint_cache in place (clearing it) and rewrites
+    CACHE_PATH to match, so both this process's own lookups and every
+    scan worker's independent reload of CACHE_PATH (see
+    _init_scan_worker_pass1 - each worker loads its own copy from disk,
+    not from this in-memory dict) see the same empty starting point."""
+    if not fingerprint_cache:
+        return
+    if _confirm_yesno(
+        f"Also ignore the {len(fingerprint_cache)} entry/entries in the existing fingerprint cache "
+        f"and rebuild it fresh from this run?"
+    ) != "yes":
+        return
+    backup_path = CACHE_PATH + ".bak"
+    try:
+        if os.path.exists(CACHE_PATH):
+            shutil.copyfile(CACHE_PATH, backup_path)
+    except Exception as e:
+        print(f"⚠️  Couldn't back up the existing cache before clearing it - leaving it as-is: {e}")
+        return
+    fingerprint_cache.clear()
+    save_fingerprint_cache(CACHE_PATH, fingerprint_cache)
+    print(f"Fingerprint cache cleared (backed up to {os.path.basename(backup_path)}) - "
+          f"it will be rebuilt fresh from this run's results.\n")
+
+
 def load_image_library(image_dir):
     """Indexes the verified LaunchBox image pack naming structures."""
     library = []
@@ -2676,6 +2709,7 @@ def run_matching_agent():
         )
         if skip_plans and prompt_scan_mode(len(skip_plans), total_files) == "full":
             skip_plans, to_scan_files = [], pdf_files
+            _offer_fresh_fingerprint_cache(fingerprint_cache)
 
     print(f"Scanning {len(to_scan_files)} PDFs using ALL investigative methods ({SCAN_WORKERS} workers in parallel)...")
     if skip_plans:
