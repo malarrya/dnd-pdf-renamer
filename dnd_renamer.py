@@ -418,7 +418,10 @@ def _confirm_yesno(message, allow_stop=False):
     return "yes" if answer in ("y", "yes") else "no"
 
 
-def _pick_match(pdf_file, full_pdf_path, candidates, all_titles, initial_guess, detail, keep_open, allow_switch_to_auto):
+def _pick_match(
+    pdf_file, full_pdf_path, candidates, all_titles, initial_guess, detail, keep_open, allow_switch_to_auto,
+    session_note=None,
+):
     """Asks a human to identify a file that couldn't be confidently
     matched automatically, by showing the PDF's own front page next to
     a searchable list of every catalog title not already claimed by
@@ -453,7 +456,9 @@ def _pick_match(pdf_file, full_pdf_path, candidates, all_titles, initial_guess, 
     image - the GUI dialog shows immediately and loads that image itself
     afterward, in the background, rather than making the whole dialog
     (and the human waiting on it) block on that extraction first; the
-    console fallback below never used the image anyway."""
+    console fallback below never used the image anyway. session_note,
+    if given, is a standing note for the whole review session (see
+    _review_files_with_picker) - not specific to this one file."""
     if PICKER_HOOK is not None:
         try:
             return PICKER_HOOK({
@@ -465,6 +470,7 @@ def _pick_match(pdf_file, full_pdf_path, candidates, all_titles, initial_guess, 
                 "detail": detail,
                 "keep_open": keep_open,
                 "allow_switch_to_auto": allow_switch_to_auto,
+                "session_note": session_note,
             })
         except Exception:
             pass  # fall through to the console prompt as a safety net
@@ -2419,7 +2425,7 @@ def review_low_confidence_matches(results, output_directory, image_library, plan
 
 def _review_files_with_picker(
     items, output_directory, fingerprint_cache, scan_index, renaming_in_place, remaining_candidates, all_titles,
-    allow_switch_to_auto=False,
+    allow_switch_to_auto=False, session_note=None,
 ):
     """Shared per-file loop behind both review_unmatched_interactively
     and review_all_manually: shows the picker dialog for each
@@ -2435,7 +2441,9 @@ def _review_files_with_picker(
     human chose to hand the rest over to the automated scan instead -
     remaining_pdf_files is then every filename from that point on
     (inclusive), for the caller to feed into the automated pipeline;
-    both are always False/empty otherwise."""
+    both are always False/empty otherwise. session_note, if given, is
+    shown once as a standing note in the picker dialog for this whole
+    review session (see review_all_manually) rather than per-file."""
     confirmed = 0
     scan_index_changed = False
     last_index = len(items) - 1
@@ -2457,7 +2465,7 @@ def _review_files_with_picker(
 
         decision, chosen_title = _pick_match(
             pdf_file, full_pdf_path, remaining_candidates, all_titles, initial_guess, detail,
-            i < last_index, allow_switch_to_auto,
+            i < last_index, allow_switch_to_auto, session_note,
         )
         if decision == "stop":
             print("\nStopping review - anything already confirmed stays renamed.")
@@ -2540,9 +2548,25 @@ def review_all_manually(pdf_files, pdf_directory, output_directory, fingerprint_
         return 0, False, []
     items = [(pdf_file, os.path.join(pdf_directory, pdf_file), None) for pdf_file in pdf_files]
     remaining_candidates = list(all_titles)
+
+    # A cheap, filename-only heads-up shown once when the picker first
+    # opens - NOT a claim these files are actually verified correct
+    # (manual mode does no content analysis at all, by design), just a
+    # hint that some of what's about to be reviewed by hand may go
+    # quickly. all_titles is already deduplicated (see resolve_display_
+    # name's caller), so a set lookup here can't double-count.
+    all_titles_set = set(all_titles)
+    already_named_count = sum(1 for pdf_file in pdf_files if os.path.splitext(pdf_file)[0] in all_titles_set)
+    session_note = None
+    if already_named_count:
+        session_note = (
+            f"{already_named_count} of {len(pdf_files)} PDF(s) already have a filename matching a catalog "
+            f"title exactly - still worth a quick glance below, since manual mode doesn't check file content."
+        )
+
     return _review_files_with_picker(
         items, output_directory, fingerprint_cache, scan_index, renaming_in_place, remaining_candidates, all_titles,
-        allow_switch_to_auto=True,
+        allow_switch_to_auto=True, session_note=session_note,
     )
 
 
@@ -3013,6 +3037,7 @@ def run_matching_agent():
     plan_targets = {pdf_file: target_final_title for pdf_file, _, target_final_title, _ in plans}
 
     matched_count = 0
+    already_correct_count = 0
     for pdf_file, match_method, new_filename, already_correct in results:
         if new_filename is None:
             if match_method and match_method not in ("None", "None [FAILED]"):
@@ -3022,6 +3047,7 @@ def run_matching_agent():
         elif already_correct:
             print(f"✅ [{match_method}] '{pdf_file}' already correctly named.")
             matched_count += 1
+            already_correct_count += 1
         else:
             print(f"✅ [{match_method}]\n   '{pdf_file}'  ->  '{new_filename}'")
             matched_count += 1
@@ -3084,6 +3110,8 @@ def run_matching_agent():
 
     print("\n==================================================")
     print(f"  Finished. Matched {matched_count} of {len(pdf_files)} PDFs.")
+    if already_correct_count:
+        print(f"  ({already_correct_count} of those were already correctly named - nothing to rename.)")
     print("==================================================")
     _report_progress("Finished", total_files, total_files)
 

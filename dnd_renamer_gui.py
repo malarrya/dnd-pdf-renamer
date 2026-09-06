@@ -589,6 +589,22 @@ def _show_picker_dialog(root, request, picker_ctx, dnd_renamer):
         main = ttk.Frame(dialog, padding=10)
         main.pack(fill="both", expand=True)
 
+        # A one-time, session-wide heads-up (currently only used by
+        # review_all_manually's already-named-by-filename count) - NOT
+        # per-file info, so it's set once below and left alone rather
+        # than being touched by the per-file refresh further down.
+        # Packed only when there's something to show, so a session with
+        # nothing to report costs zero layout space, same as before this
+        # existed.
+        session_note_var = tk.StringVar()
+        session_note_label = ttk.Label(
+            main, textvariable=session_note_var, justify="left", foreground="#666",
+            font=("", 8, "italic"), wraplength=720,
+        )
+        if request.get("session_note"):
+            session_note_var.set(request["session_note"])
+            session_note_label.pack(anchor="w", pady=(0, 6))
+
         info_var = tk.StringVar()
         ttk.Label(main, textvariable=info_var, justify="left").pack(anchor="w", pady=(0, 8))
 
