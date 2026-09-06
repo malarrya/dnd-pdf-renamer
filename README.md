@@ -64,6 +64,13 @@ confidently matched" review now also updates the incremental-scan
 index, not just the fingerprint cache, so a future in-place scan can
 skip re-reading that file too.
 
+[**v1.1.4**](https://github.com/malarrya/dnd-pdf-renamer/releases/tag/v1.1.4)
+makes the visual "Confirm Suggestion" review dialog clearer about what
+it's showing: the text now labels the current filename vs. the
+suggested identity explicitly, and the two images are captioned
+"Suggested match (catalog box art)" and "This file's own front page"
+with a direct prompt asking whether they show the same book.
+
 If you installed v1.0.0 and hit an infinite "Press Enter to continue" loop
 that kept re-spawning itself, update to v1.0.1 or later - that version was
 missing `multiprocessing.freeze_support()`, so a worker process would fail
