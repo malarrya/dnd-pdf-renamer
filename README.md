@@ -177,6 +177,8 @@ That means a cache built up from one person's collection can give someone else's
 
 `dnd_renamer_cache.example.json` is a snapshot of one such cache for the D&D Classic Editions catalog. To use it, copy it to `dnd_renamer_cache.json` next to your own copy of the script before your first run. It won't help with files that aren't byte-identical to something already in it — those still go through the normal identification pipeline like any new file.
 
+A file you identify yourself — confirming a pick in the "couldn't be confidently matched" review, or in 100%-manual mode — gets added to the cache exactly the same way as an automated match. That means a cache built up entirely by hand, from a fully manual pass over your whole collection, is just as useful to share as one built from automated matches alone.
+
 ## Beyond D&D Classic Editions
 
 The matching logic isn't specific to any one catalog — it works from whatever XML platform file and image folder you point it at. Pointing it at a different LaunchBox platform (e.g. a D&D 5th Edition catalog) should work the same way, no code changes needed.
