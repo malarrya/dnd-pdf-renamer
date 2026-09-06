@@ -71,6 +71,12 @@ suggested identity explicitly, and the two images are captioned
 "Suggested match (catalog box art)" and "This file's own front page"
 with a direct prompt asking whether they show the same book.
 
+[**v1.2.0**](https://github.com/malarrya/dnd-pdf-renamer/releases/tag/v1.2.0)
+replaces the "couldn't be confidently matched" review's plain yes/no
+with a searchable picker - see [Usage](#usage) below for what that
+looks like. A file with no automated guess at all now gets a real
+chance at manual review too, instead of being silently skipped.
+
 If you installed v1.0.0 and hit an infinite "Press Enter to continue" loop
 that kept re-spawning itself, update to v1.0.1 or later - that version was
 missing `multiprocessing.freeze_support()`, so a worker process would fail
@@ -120,7 +126,11 @@ Your answers are saved to `dnd_renamer_config.json` next to the script, so you w
 python dnd_renamer.py
 ```
 
-The scan itself runs in a window showing a progress bar and a scrolling log of everything happening (the same messages you'd otherwise only see in the console), with **Pause** (lets any files already in progress finish, then holds before starting more) and **Cancel** buttons that work at the same safe points a console Ctrl+C always could. Once the scan finishes, it asks - in the same window - whether to review anything left unmatched or renamed on a low-confidence guess; reviewing one shows the catalog's box-art image side by side with a preview of the PDF's own front page, so you can visually confirm or reject the suggestion instead of judging on the filename alone. Nothing is renamed without either a confident automated match or your explicit confirmation.
+The scan itself runs in a window showing a progress bar and a scrolling log of everything happening (the same messages you'd otherwise only see in the console), with **Pause** (lets any files already in progress finish, then holds before starting more) and **Cancel** buttons that work at the same safe points a console Ctrl+C always could. Once the scan finishes, it asks - in the same window - whether to review anything left unmatched or renamed on a low-confidence guess:
+- A file already renamed on a low-confidence guess shows the catalog's box-art image side by side with a preview of the PDF's own front page, so you can visually confirm or reject the suggestion instead of judging on the filename alone.
+- A file that couldn't be matched at all shows that same front-page preview next to a searchable list of every catalog title not already claimed by another file this run - the algorithm's best guess, if it has one, comes pre-selected, but you can pick any other title directly instead of just accepting or rejecting that one guess.
+
+Nothing is renamed without either a confident automated match or your explicit confirmation.
 
 If you're renaming in place (output folder same as PDF folder) and a previous run already confirmed some files, you'll be asked whether to do a **full** scan (re-verify every file's content from scratch) or an **incremental** one (skip any file whose size and modified time haven't changed since it was last confirmed, and only scan what's new or changed). Incremental scans avoid the full-file read needed to re-verify each PDF, which matters most when the PDF folder is on a network share.
 
