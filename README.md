@@ -149,6 +149,15 @@ unresolved, so a future run asks about it again), this treats the
 file's current name as a confirmed match and caches it, without
 renaming anything.
 
+If you installed v1.8.0, update to
+[**v1.8.1**](https://github.com/malarrya/dnd-pdf-renamer/releases/tag/v1.8.1)
+or later - some front-page previews (and, more importantly, the
+automated cover-image matching layer) could pick a tiny or garbled
+embedded image instead of the real scan, when a PDF's page stored a
+small logo, watermark, low-res thumbnail, or mask alongside the actual
+page image. Both now pick the largest embedded image on the page
+instead of whichever one happened to come first internally.
+
 If you installed v1.0.0 and hit an infinite "Press Enter to continue" loop
 that kept re-spawning itself, update to v1.0.1 or later - that version was
 missing `multiprocessing.freeze_support()`, so a worker process would fail
