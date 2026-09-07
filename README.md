@@ -124,6 +124,15 @@ exactly match a catalog title - a filename-only heads-up, not a claim
 those files are verified correct, since manual mode does no content
 analysis of its own.
 
+If you installed v1.6.0, update to
+[**v1.7.0**](https://github.com/malarrya/dnd-pdf-renamer/releases/tag/v1.7.0)
+or later - that version's picker could open with its buttons clipped
+at the bottom whenever the already-correctly-named note was shown,
+requiring a manual resize to see them. It also adds a checkbox next to
+that note to skip those already-correctly-named files outright, with
+no round-trip through the picker at all - just left untouched, same as
+clicking Skip.
+
 If you installed v1.0.0 and hit an infinite "Press Enter to continue" loop
 that kept re-spawning itself, update to v1.0.1 or later - that version was
 missing `multiprocessing.freeze_support()`, so a worker process would fail
