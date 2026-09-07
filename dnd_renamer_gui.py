@@ -1156,14 +1156,26 @@ def run_scan_window(run_fn, dnd_renamer):
                         pause_button.configure(state="disabled")
                         cancel_button.configure(state="disabled")
                         close_button.configure(state="normal")
-                        # A 100%-manual run that finishes WITHOUT ever
-                        # switching back to automated (the only other
-                        # path that reveals this window) would otherwise
-                        # stay withdrawn forever with no visible way to
-                        # reach the now-enabled Close button - the
-                        # picker dialog that could reach it is already
-                        # gone by this point (it closes as soon as the
-                        # last file's reviewed).
+                        # The picker dialog is USUALLY already gone by
+                        # this point (it closes as soon as the last file
+                        # is reviewed) - except when the "skip already-
+                        # correct" filter (see dnd_renamer.SKIP_ALREADY_
+                        # CORRECT_NAMES) silently filtered out every
+                        # remaining file after the last one a human
+                        # actually saw: that file's own request had
+                        # keep_open=True (another _pick_match call
+                        # looked imminent when it was sent), so the
+                        # dialog is left showing "Loading next file..."
+                        # forever, since that next call never actually
+                        # comes - nothing else was ever going to close
+                        # it. "done" only ever arrives once run_fn has
+                        # fully returned, which can't happen while a
+                        # dialog is still genuinely waiting on a human
+                        # decision - so it's always safe to clean up
+                        # whatever's left open here.
+                        if picker_ctx.get("dialog") is not None:
+                            picker_ctx["dialog"].destroy()
+                            picker_ctx.clear()
                         if not root.winfo_viewable():
                             root.deiconify()
                             _center(root)

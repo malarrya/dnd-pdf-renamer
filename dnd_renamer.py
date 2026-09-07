@@ -2461,6 +2461,26 @@ def _review_files_with_picker(
     skipped_already_correct = 0
     all_titles_set = set(all_titles)
 
+    def _another_real_file_follows(start_index):
+        """Whether calling _pick_match again is actually still coming,
+        rather than just there being more raw items left. Naively using
+        `i < last_index` as keep_open told a real GUI dialog to expect
+        another file that then never arrived whenever every remaining
+        item got silently filtered out by the skip-already-correct
+        checkbox - the dialog was left showing "Loading next file..."
+        forever, since nothing else was ever going to close it (see
+        dnd_renamer_gui.py's "done" handler for the belt-and-suspenders
+        fix on the GUI side of that same bug). This can still be wrong
+        if a human toggles the checkbox again after this lookahead runs,
+        but that's no different from every other timing limitation of
+        keep_open being decided once, up front, per request."""
+        if not SKIP_ALREADY_CORRECT_NAMES:
+            return start_index <= last_index
+        return any(
+            os.path.splitext(pdf_file)[0] not in all_titles_set
+            for pdf_file, _full_pdf_path, _guess in items[start_index:]
+        )
+
     for i, (pdf_file, full_pdf_path, guess) in enumerate(items):
         _check_control()
         # The picker's "skip already-correctly-named files" checkbox
@@ -2486,7 +2506,7 @@ def _review_files_with_picker(
 
         decision, chosen_title = _pick_match(
             pdf_file, full_pdf_path, remaining_candidates, all_titles, initial_guess, detail,
-            i < last_index, allow_switch_to_auto, session_note,
+            _another_real_file_follows(i + 1), allow_switch_to_auto, session_note,
         )
         if decision == "stop":
             print("\nStopping review - anything already confirmed stays renamed.")
