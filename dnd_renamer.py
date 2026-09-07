@@ -1094,6 +1094,34 @@ def build_cover_hash_index(image_library):
     return index
 
 
+def _largest_page_image(page):
+    """The visually largest embedded image on this page (by pixel
+    area), or None if it has none / none could be decoded. A scanned
+    page's real content is normally one dominant image, but pypdf's own
+    page.images iteration isn't ordered by size or position - it just
+    walks the PDF's internal resource dictionary, which just as easily
+    lists a small logo, watermark, low-res thumbnail some scanning
+    software embeds, a tiled piece of the scan, or a soft-mask/alpha-
+    channel object FIRST instead of the actual page content. Picking
+    the largest by area is a much stronger heuristic for "this is the
+    real picture" than "whichever came first" - confirmed as a real,
+    reproduced issue: some scans' front-page previews (and, more
+    importantly, their cover-image match against the catalog's box art
+    below) were coming out tiny and garbled from exactly this."""
+    best = None
+    best_area = 0
+    for img in page.images:
+        try:
+            pil_image = img.image if img.image is not None else Image.open(io.BytesIO(img.data))
+        except Exception:
+            continue
+        area = pil_image.width * pil_image.height
+        if area > best_area:
+            best = pil_image
+            best_area = area
+    return best
+
+
 def pdf_cover_hash(reader):
     """Perceptual hash of the PDF's own first-page image (the front
     cover), or None if unavailable. Deliberately only page 1 - unlike
@@ -1102,8 +1130,8 @@ def pdf_cover_hash(reader):
     if not IMAGEHASH_AVAILABLE or len(reader.pages) == 0:
         return None
     try:
-        for img in reader.pages[0].images:
-            pil_image = img.image if img.image is not None else Image.open(io.BytesIO(img.data))
+        pil_image = _largest_page_image(reader.pages[0])
+        if pil_image is not None:
             return imagehash.phash(pil_image, hash_size=COVER_HASH_SIZE)
     except Exception:
         pass
@@ -1522,17 +1550,17 @@ def _find_box_art_path(display_name, image_library):
 
 def _extract_first_page_image(full_pdf_path):
     """Best-effort preview of the PDF's own front page for a human
-    reviewing a low-confidence suggestion - the same embedded-image
-    extraction pdf_cover_hash uses for hashing, just returning the image
-    itself. Only works for scanned PDFs (a raster image embedded on page
-    1); returns None for born-digital/text PDFs with no such image, or
-    on any read error - the caller shows a placeholder in that case."""
+    reviewing a low-confidence suggestion - the same largest-embedded-
+    image selection pdf_cover_hash uses for hashing (see
+    _largest_page_image), just returning the image itself. Only works
+    for scanned PDFs (a raster image embedded on page 1); returns None
+    for born-digital/text PDFs with no such image, or on any read error
+    - the caller shows a placeholder in that case."""
     try:
         reader = PdfReader(full_pdf_path)
         if len(reader.pages) == 0:
             return None
-        for img in reader.pages[0].images:
-            return img.image if img.image is not None else Image.open(io.BytesIO(img.data))
+        return _largest_page_image(reader.pages[0])
     except Exception:
         pass
     return None
