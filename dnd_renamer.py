@@ -293,6 +293,15 @@ OUTPUT_DIRECTORY = None  # Safe to keep identical to PDF_DIRECTORY
 # which case run_matching_agent() still asks the old way itself.
 MANUAL_MODE = None
 
+# Toggled live by a checkbox on the 100%-manual picker dialog (see
+# review_all_manually/_review_files_with_picker) - when True, a file
+# whose current name already matches a catalog title exactly is
+# skipped without ever being shown in the picker, same end effect as a
+# human clicking Skip on it (no rename, no cache/scan-index entry).
+# Reset to False at the start of every fresh manual-review session
+# rather than left however a previous one left it.
+SKIP_ALREADY_CORRECT_NAMES = False
+
 # When frozen into a PyInstaller onefile exe, __file__ resolves inside the
 # temporary _MEIxxxx extraction dir (wiped after every run), not next to the
 # exe - so config/cache would silently reset on every launch. sys.executable
@@ -2449,9 +2458,21 @@ def _review_files_with_picker(
     last_index = len(items) - 1
     switch_to_auto = False
     remaining_pdf_files = []
+    skipped_already_correct = 0
+    all_titles_set = set(all_titles)
 
     for i, (pdf_file, full_pdf_path, guess) in enumerate(items):
         _check_control()
+        # The picker's "skip already-correctly-named files" checkbox
+        # (review_all_manually only - see there) - checked live every
+        # iteration rather than once, since a human can toggle it on or
+        # off mid-session. Bypasses _pick_match/PICKER_HOOK entirely for
+        # a filtered file, so this never costs the cross-thread
+        # round-trip a real picker request would - the loop can fly
+        # through hundreds of these near-instantly.
+        if SKIP_ALREADY_CORRECT_NAMES and os.path.splitext(pdf_file)[0] in all_titles_set:
+            skipped_already_correct += 1
+            continue
         if guess:
             initial_guess, score, source, _box_art_path = guess
             detail = f"(guess from {source}, score {score:.2f})"
@@ -2521,6 +2542,9 @@ def _review_files_with_picker(
     if confirmed:
         save_fingerprint_cache(CACHE_PATH, fingerprint_cache)
         print(f"\nConfirmed {confirmed} rename(s) and updated the fingerprint cache.")
+    if skipped_already_correct:
+        print(f"Skipped {skipped_already_correct} file(s) whose name already matched a catalog title "
+              f"(the \"skip already-correctly-named files\" checkbox was on) - left untouched, not reviewed.")
     if scan_index_changed:
         save_scan_index(SCAN_INDEX_PATH, scan_index)
     return confirmed, switch_to_auto, remaining_pdf_files
@@ -2542,8 +2566,17 @@ def review_all_manually(pdf_files, pdf_directory, output_directory, fingerprint_
     Automated Scan" escape hatch (allow_switch_to_auto=True) - a human
     can hand whatever's left unreviewed back to the automated pipeline
     at any point, rather than being stuck manually identifying an
-    entire large collection once they've started. Returns (confirmed,
+    entire large collection once they've started. Also unlike it, this
+    is the only path where a picker session's "skip already-correctly-
+    named files" checkbox (SKIP_ALREADY_CORRECT_NAMES) is even offered -
+    see the session_note comment below for why. Returns (confirmed,
     switch_to_auto, remaining_pdf_files) - see _review_files_with_picker."""
+    global SKIP_ALREADY_CORRECT_NAMES
+    # However the last review session (if any) left this, a fresh one
+    # always starts with the filter off - the checkbox that would flip
+    # it back on doesn't exist until this session's own dialog is built.
+    SKIP_ALREADY_CORRECT_NAMES = False
+
     if not pdf_files:
         return 0, False, []
     items = [(pdf_file, os.path.join(pdf_directory, pdf_file), None) for pdf_file in pdf_files]
@@ -2553,15 +2586,17 @@ def review_all_manually(pdf_files, pdf_directory, output_directory, fingerprint_
     # opens - NOT a claim these files are actually verified correct
     # (manual mode does no content analysis at all, by design), just a
     # hint that some of what's about to be reviewed by hand may go
-    # quickly. all_titles is already deduplicated (see resolve_display_
-    # name's caller), so a set lookup here can't double-count.
+    # quickly, and that a checkbox is available to skip them outright.
+    # all_titles is already deduplicated (see resolve_display_name's
+    # caller), so a set lookup here can't double-count.
     all_titles_set = set(all_titles)
     already_named_count = sum(1 for pdf_file in pdf_files if os.path.splitext(pdf_file)[0] in all_titles_set)
     session_note = None
     if already_named_count:
         session_note = (
             f"{already_named_count} of {len(pdf_files)} PDF(s) already have a filename matching a catalog "
-            f"title exactly - still worth a quick glance below, since manual mode doesn't check file content."
+            f"title exactly - still worth a quick glance, since manual mode doesn't check file content, but "
+            f"you can check the box below to skip straight past them."
         )
 
     return _review_files_with_picker(

@@ -583,8 +583,14 @@ def _show_picker_dialog(root, request, picker_ctx, dnd_renamer):
         # dialog's natural packed height is ~585px). minsize is set to the
         # same floor so manually shrinking the window can't recreate that
         # same clipping; it can still be made bigger still if wanted.
-        dialog.geometry("760x600")
-        dialog.minsize(760, 600)
+        # A session with a standing note (see session_note_label below)
+        # adds two more rows above everything else - taller still (~660px
+        # measured with a realistic two-line note), decided once here
+        # from whatever this very first request carries, since the
+        # dialog's size is never changed again after this.
+        dialog_height = 660 if request.get("session_note") else 600
+        dialog.geometry(f"760x{dialog_height}")
+        dialog.minsize(760, dialog_height)
 
         main = ttk.Frame(dialog, padding=10)
         main.pack(fill="both", expand=True)
@@ -601,9 +607,27 @@ def _show_picker_dialog(root, request, picker_ctx, dnd_renamer):
             main, textvariable=session_note_var, justify="left", foreground="#666",
             font=("", 8, "italic"), wraplength=720,
         )
+
+        # Toggling this writes straight to dnd_renamer.SKIP_ALREADY_
+        # CORRECT_NAMES - the worker thread's own review loop checks
+        # that flag itself, every iteration, before ever calling this
+        # dialog for a given file (see _review_files_with_picker). That
+        # means a filtered-out file never costs a round-trip through
+        # this dialog at all, unlike routing the skip decision through
+        # here would - a plain module attribute is safe to flip from
+        # this (GUI) thread and read from the worker thread the same way
+        # MANUAL_MODE/CANCEL_EVENT/etc. already are elsewhere.
+        skip_correct_var = tk.BooleanVar(value=False)
+        skip_correct_check = ttk.Checkbutton(
+            main, variable=skip_correct_var,
+            text="Skip files whose name already matches a catalog title exactly",
+            command=lambda: setattr(dnd_renamer, "SKIP_ALREADY_CORRECT_NAMES", skip_correct_var.get()),
+        )
+
         if request.get("session_note"):
             session_note_var.set(request["session_note"])
-            session_note_label.pack(anchor="w", pady=(0, 6))
+            session_note_label.pack(anchor="w", pady=(0, 2))
+            skip_correct_check.pack(anchor="w", pady=(0, 6))
 
         info_var = tk.StringVar()
         ttk.Label(main, textvariable=info_var, justify="left").pack(anchor="w", pady=(0, 8))
