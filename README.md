@@ -167,6 +167,18 @@ any non-PDF file in your folder against those entries by filename alone
 (there's no content to check), acting only on an exact or unambiguous
 match and leaving anything uncertain untouched.
 
+[**v1.10.0**](https://github.com/malarrya/dnd-pdf-renamer/releases/tag/v1.10.0)
+reviews numbered-suffix collisions: a file renamed "... (2).pdf" means
+two different files this run were both matched to the exact same
+title - the only legitimate reason for that is a genuine duplicate PDF,
+so it's a strong sign at least one was actually misidentified, which
+previously got cached under its assigned title with no review at all.
+You're now offered a chance to review any of these one at a time in the
+same picker used everywhere else, with the assigned title pre-selected -
+confirming re-affirms a real duplicate, picking or typing anything else
+corrects the misidentification and overwrites whatever was already
+cached for it.
+
 If you installed v1.0.0 and hit an infinite "Press Enter to continue" loop
 that kept re-spawning itself, update to v1.0.1 or later - that version was
 missing `multiprocessing.freeze_support()`, so a worker process would fail
