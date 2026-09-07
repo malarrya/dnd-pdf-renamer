@@ -73,6 +73,25 @@ try:
     if _tesseract_cmd:
         pytesseract.pytesseract.tesseract_cmd = _tesseract_cmd
         OCR_AVAILABLE = True
+
+    # pytesseract already hides the tesseract.exe window it launches
+    # (STARTUPINFO/SW_HIDE, in its own subprocess_args()), but that alone
+    # still let a console window flash briefly on screen for an instant
+    # in the packaged --windowed build before Windows caught up and hid
+    # it - the standard extra step for a windowed PyInstaller app calling
+    # a console-subsystem executable is also passing CREATE_NO_WINDOW,
+    # which pytesseract's own subprocess_args() doesn't set. Patched here
+    # (once, right after import) rather than hand-editing the installed
+    # pytesseract package, which wouldn't survive a reinstall/upgrade.
+    if hasattr(subprocess, "CREATE_NO_WINDOW"):
+        _orig_tesseract_subprocess_args = pytesseract.pytesseract.subprocess_args
+
+        def _tesseract_subprocess_args_hidden(include_stdout=True):
+            kwargs = _orig_tesseract_subprocess_args(include_stdout)
+            kwargs["creationflags"] = kwargs.get("creationflags", 0) | subprocess.CREATE_NO_WINDOW
+            return kwargs
+
+        pytesseract.pytesseract.subprocess_args = _tesseract_subprocess_args_hidden
 except ImportError:
     pass
 
@@ -457,7 +476,11 @@ def _pick_match(
     equivalent of browsing/searching a long list or switching modes, so
     without a hook this only ever offers the automated guess, same as
     before. Returns ("yes", chosen_title) to rename the file to
-    chosen_title, ("no", None) to leave it unmatched, ("stop", None) to
+    chosen_title, ("no", None) to leave it unmatched, ("keep", None) to
+    treat the file's OWN current name as a confirmed match (cached and
+    scan-indexed the same as "yes", just with no actual rename since
+    there's nothing to change - GUI-only, like allow_switch_to_auto,
+    since there's no sensible console equivalent), ("stop", None) to
     stop reviewing the rest, or ("switch_to_auto", None) to hand the
     rest of the unreviewed files to the automated scan instead.
 
@@ -2454,6 +2477,7 @@ def _review_files_with_picker(
     shown once as a standing note in the picker dialog for this whole
     review session (see review_all_manually) rather than per-file."""
     confirmed = 0
+    kept_as_is = 0
     scan_index_changed = False
     last_index = len(items) - 1
     switch_to_auto = False
@@ -2516,6 +2540,31 @@ def _review_files_with_picker(
             switch_to_auto = True
             remaining_pdf_files = [item[0] for item in items[i:]]
             break
+        if decision == "keep":
+            # The file's own current name IS the confirmed title - same
+            # cache/scan-index bookkeeping as a real "yes", just with no
+            # os.rename() since source and target are already identical.
+            chosen_title = os.path.splitext(pdf_file)[0]
+            confirmed += 1
+            kept_as_is += 1
+            file_sha256 = hash_file_sha256(full_pdf_path)
+            if file_sha256:
+                fingerprint_cache[file_sha256] = {
+                    "title": chosen_title, "matched_via": "Human-Confirmed (Keep Current Name)",
+                }
+            if chosen_title in remaining_candidates:
+                remaining_candidates.remove(chosen_title)
+            if renaming_in_place and file_sha256:
+                try:
+                    stat = os.stat(full_pdf_path)
+                except OSError:
+                    stat = None
+                if stat is not None:
+                    entry = {"size": stat.st_size, "mtime": stat.st_mtime, "sha256": file_sha256}
+                    if scan_index.get(pdf_file) != entry:
+                        scan_index[pdf_file] = entry
+                        scan_index_changed = True
+            continue
         if decision != "yes" or not chosen_title:
             continue
 
@@ -2561,7 +2610,12 @@ def _review_files_with_picker(
 
     if confirmed:
         save_fingerprint_cache(CACHE_PATH, fingerprint_cache)
-        print(f"\nConfirmed {confirmed} rename(s) and updated the fingerprint cache.")
+        if kept_as_is:
+            renamed = confirmed - kept_as_is
+            print(f"\nConfirmed {confirmed} match(es) and updated the fingerprint cache "
+                  f"({renamed} renamed, {kept_as_is} kept under their current name).")
+        else:
+            print(f"\nConfirmed {confirmed} rename(s) and updated the fingerprint cache.")
     if skipped_already_correct:
         print(f"Skipped {skipped_already_correct} file(s) whose name already matched a catalog title "
               f"(the \"skip already-correctly-named files\" checkbox was on) - left untouched, not reviewed.")

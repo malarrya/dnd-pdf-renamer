@@ -640,6 +640,9 @@ def _show_picker_dialog(root, request, picker_ctx, dnd_renamer):
         ttk.Label(image_col, text="This file's own\nfront page", font=("", 8, "bold")).pack()
         image_label = ttk.Label(image_col, justify="center", anchor="center")
         image_label.pack()
+        ttk.Label(
+            image_col, text="(click image to enlarge)", font=("", 7), foreground="#666",
+        ).pack(pady=(2, 0))
 
         list_col = ttk.Frame(body)
         list_col.pack(side="left", fill="both", expand=True)
@@ -793,12 +796,53 @@ def _show_picker_dialog(root, request, picker_ctx, dnd_renamer):
             ).pack(side="left", padx=(8, 0))
         skip_button = ttk.Button(button_row, text="Skip This File", command=lambda: choose("no"))
         skip_button.pack(side="right", padx=(8, 0))
+        # Unlike Skip (leaves the file's identity unresolved - nothing
+        # recorded, so a future run asks about it again), this treats
+        # the file's OWN current name as a confirmed match: same
+        # fingerprint-cache/scan-index bookkeeping as Confirm Selected,
+        # just without an actual rename since there's nothing to change.
+        keep_name_button = ttk.Button(button_row, text="Keep Current Name", command=lambda: choose("keep"))
+        keep_name_button.pack(side="right", padx=(8, 0))
         confirm_button = ttk.Button(button_row, text="Confirm Selected", command=lambda: choose("yes"))
         confirm_button.pack(side="right")
 
         dialog.protocol("WM_DELETE_WINDOW", lambda: choose("stop"))
         _center_on_parent(dialog, root)
         dialog.grab_set()
+
+        def show_full_image():
+            # No-op while there's nothing loaded yet (still "Loading
+            # preview..." or a file with no embedded page-1 image at
+            # all) - req_state["full_image"] is cleared for exactly
+            # those cases below.
+            img = req_state.get("full_image")
+            if img is None:
+                return
+            popup = tk.Toplevel(dialog)
+            popup.title(f"Front Page Preview - {req_state.get('pdf_file', '')}")
+            # dialog (the parent here) is always mapped/visible whenever
+            # a click on its own image could happen - unlike root
+            # elsewhere in this file, there's no withdrawn-parent
+            # transient() pitfall to work around here.
+            popup.transient(dialog)
+            # Clamped to most of the screen rather than shown at full
+            # native resolution outright - a full-page scan can easily
+            # be larger than the screen itself, which would make for an
+            # unusable, off-screen window.
+            max_w = int(popup.winfo_screenwidth() * 0.85)
+            max_h = int(popup.winfo_screenheight() * 0.85)
+            shown = img.copy()
+            shown.thumbnail((max_w, max_h))
+            photo = ImageTk.PhotoImage(shown)
+            req_state["photo_refs"].append(photo)  # keeps this PhotoImage alive too
+            ttk.Label(popup, image=photo).pack(padx=8, pady=(8, 4))
+            ttk.Button(popup, text="Close", command=popup.destroy).pack(pady=(0, 8))
+            popup.bind("<Escape>", lambda _e: popup.destroy())
+            _center_on_parent(popup, dialog)
+            popup.grab_set()
+            popup.focus_set()
+
+        image_label.bind("<Button-1>", lambda _e: show_full_image())
 
         def apply_preview(token, img):
             # Discarded if the human already moved on to a different
@@ -817,11 +861,13 @@ def _show_picker_dialog(root, request, picker_ctx, dnd_renamer):
                     photo = None
             if photo is not None:
                 req_state["photo_refs"].append(photo)
-                image_label.configure(image=photo, text="", relief="flat", borderwidth=0, width=0)
+                req_state["full_image"] = img
+                image_label.configure(image=photo, text="", relief="flat", borderwidth=0, width=0, cursor="hand2")
             else:
+                req_state["full_image"] = None
                 image_label.configure(
                     image="", text="(no preview\navailable)",
-                    relief="solid", borderwidth=1, width=18,
+                    relief="solid", borderwidth=1, width=18, cursor="",
                 )
 
         # A dedicated queue rather than reusing the run window's shared
@@ -872,6 +918,11 @@ def _show_picker_dialog(root, request, picker_ctx, dnd_renamer):
     req_state["initial_guess"] = request.get("initial_guess")
     req_state["keep_open"] = request.get("keep_open", False)
     req_state["result"] = {"decision": "no", "chosen_title": None}
+    req_state["pdf_file"] = request["pdf_file"]
+    # Cleared immediately (rather than left showing the PREVIOUS file's
+    # full image) until this file's own preview finishes loading and
+    # apply_preview sets it for real - see show_full_image/apply_preview.
+    req_state["full_image"] = None
 
     # Hide the loading overlay from the previous decision (if any) and
     # re-enable the buttons it disabled - Confirm/Use This Name get
@@ -892,7 +943,7 @@ def _show_picker_dialog(root, request, picker_ctx, dnd_renamer):
     req_state["load_token"] = req_state.get("load_token", 0) + 1
     my_token = req_state["load_token"]
     picker_ctx["image_label"].configure(
-        image="", text="Loading preview...", relief="solid", borderwidth=1, width=18,
+        image="", text="Loading preview...", relief="solid", borderwidth=1, width=18, cursor="",
     )
 
     preview_queue = picker_ctx["preview_queue"]
