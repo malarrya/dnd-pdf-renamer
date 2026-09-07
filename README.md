@@ -133,6 +133,13 @@ that note to skip those already-correctly-named files outright, with
 no round-trip through the picker at all - just left untouched, same as
 clicking Skip.
 
+If you installed v1.7.0, update to
+[**v1.7.1**](https://github.com/malarrya/dnd-pdf-renamer/releases/tag/v1.7.1)
+or later - that version's picker could get stuck showing "Loading next
+file..." forever if the skip-already-correct filter happened to skip
+every remaining file after the last one you actually reviewed, since
+nothing was left to close the dialog in that case.
+
 If you installed v1.0.0 and hit an infinite "Press Enter to continue" loop
 that kept re-spawning itself, update to v1.0.1 or later - that version was
 missing `multiprocessing.freeze_support()`, so a worker process would fail
