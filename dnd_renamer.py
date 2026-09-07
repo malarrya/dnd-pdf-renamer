@@ -2487,13 +2487,19 @@ def _review_files_with_picker(
     items, output_directory, fingerprint_cache, scan_index, renaming_in_place, remaining_candidates, all_titles,
     allow_switch_to_auto=False, session_note=None,
 ):
-    """Shared per-file loop behind both review_unmatched_interactively
-    and review_all_manually: shows the picker dialog for each
-    (pdf_file, full_pdf_path, guess_or_None) entry in items, and on a
-    confirmed pick renames the file, seeds the fingerprint cache, and
-    (when renaming in place) updates the scan index - identical
-    bookkeeping either way, whether the pick confirmed an automated
-    guess or came from nothing but a human's own visual identification.
+    """Shared per-file loop behind review_unmatched_interactively,
+    review_all_manually, and review_collision_suffixed_files: shows the
+    picker dialog for each (pdf_file, full_pdf_path, guess) entry in
+    items, and on a confirmed pick renames the file, seeds the
+    fingerprint cache, and (when renaming in place) updates the scan
+    index - identical bookkeeping either way, whether the pick confirmed
+    an automated guess or came from nothing but a human's own visual
+    identification. guess is None (no guess at all), a 4-tuple
+    (initial_guess, score, source, box_art_path) from best_guess_for_
+    unmatched, or a 2-tuple (initial_guess, detail) when the caller
+    already has its own exact, human-readable explanation that the
+    generic "(guess from X, score Y)" template built from the 4-tuple
+    form doesn't fit (see review_collision_suffixed_files).
     remaining_candidates is mutated in place as titles get claimed, so
     two files in the same pass can never both claim the same title.
     Returns (confirmed, switch_to_auto, remaining_pdf_files):
@@ -2545,11 +2551,24 @@ def _review_files_with_picker(
         if SKIP_ALREADY_CORRECT_NAMES and os.path.splitext(pdf_file)[0] in all_titles_set:
             skipped_already_correct += 1
             continue
-        if guess:
+        if guess and len(guess) == 4:
             initial_guess, score, source, _box_art_path = guess
             detail = f"(guess from {source}, score {score:.2f})"
+        elif guess and len(guess) == 2:
+            # A pre-formatted (initial_guess, detail) pair rather than
+            # the (initial_guess, score, source, box_art_path) shape
+            # best_guess_for_unmatched produces - used when the caller
+            # already has an exact, human-readable explanation of its
+            # own (see review_collision_suffixed_files) that the generic
+            # "(guess from X, score Y)" template doesn't fit. source is
+            # only meaningful for the 4-tuple form above (it feeds the
+            # "Human-Confirmed Suggestion (source)" cache label below) -
+            # None here falls through to the "Human-Selected"/"Human-
+            # Entered" labels instead, same as having no guess at all.
+            initial_guess, detail = guess
+            source = None
         else:
-            initial_guess, source, detail = None, None, "(no automated guess available)"
+            initial_guess, detail, source = None, "(no automated guess available)", None
         # A guess is only offered as pickable if it's still unclaimed -
         # best_guess_for_unmatched doesn't itself check that, so without
         # this a stale/duplicate guess could otherwise get pre-selected.
@@ -2600,7 +2619,15 @@ def _review_files_with_picker(
         new_filename = f"{safe_title}.pdf"
         new_path = os.path.join(output_directory, new_filename)
         counter = 1
-        while os.path.exists(new_path):
+        # A path "occupied" only by this same file (not a distinct,
+        # blocking one) isn't a real collision - without this check,
+        # re-confirming a file that's already sitting at "Title (2).pdf"
+        # (e.g. re-affirming a genuine duplicate via
+        # review_collision_suffixed_files) saw its OWN current name as
+        # taken and needlessly bumped it to "Title (3).pdf", creeping the
+        # number up a bit further on every single re-review.
+        same_file = os.path.normcase(os.path.abspath(full_pdf_path))
+        while os.path.exists(new_path) and os.path.normcase(os.path.abspath(new_path)) != same_file:
             counter += 1
             new_filename = f"{safe_title} ({counter}).pdf"
             new_path = os.path.join(output_directory, new_filename)
@@ -2705,6 +2732,61 @@ def review_all_manually(pdf_files, pdf_directory, output_directory, fingerprint_
         items, output_directory, fingerprint_cache, scan_index, renaming_in_place, remaining_candidates, all_titles,
         allow_switch_to_auto=True, session_note=session_note,
     )
+
+
+def review_collision_suffixed_files(collision_suffixed, output_directory, fingerprint_cache, scan_index, renaming_in_place, all_titles):
+    """Post-rename review step: execute_renames only ever adds a
+    numbered "(2)"/"(3)" suffix when two different files THIS SAME RUN
+    were both confidently matched to the exact same catalog title - the
+    only way that's legitimate is a genuine duplicate PDF, so a suffix
+    is a strong signal at least one of them was actually misidentified,
+    not proof either one is correct. Nothing upstream ever puts that in
+    front of a human on its own - run_matching_agent seeds the
+    fingerprint cache from every confirmed match under its INTENDED
+    (pre-suffix) title regardless of whether that title collided with
+    anything, so a wrong match here would otherwise get cached and
+    trusted completely silently.
+
+    Shows the picker for each one, with the title it was actually
+    assigned pre-selected: confirming it re-affirms a genuine duplicate
+    (the file simply keeps its already-suffixed name), while picking or
+    typing anything else corrects a real misidentification - which also
+    overwrites whatever the automated pass already cached for that
+    file's content hash, via the exact same rename/cache/scan-index
+    bookkeeping every other picker-driven review already uses.
+    collision_suffixed is a list of (pdf_file, match_method,
+    new_filename, assigned_title) - new_filename is the file's current,
+    already-suffixed on-disk name; assigned_title is the clean title it
+    was actually matched to (what collided), pre-selected as the guess.
+    Returns the number confirmed (renamed-to-something-else or
+    re-affirmed)."""
+    if not collision_suffixed:
+        return 0
+
+    print(f"\n{len(collision_suffixed)} file(s) were renamed with a numbered suffix (e.g. \"... (2).pdf\") "
+          f"because another file this run was ALSO matched to the exact same title - usually a sign at "
+          f"least one of them was actually misidentified.")
+    if _confirm_yesno("Review them one at a time to confirm or correct?") != "yes":
+        print("Skipping review.")
+        return 0
+
+    items = [
+        (
+            new_filename,
+            os.path.join(output_directory, new_filename),
+            (
+                assigned_title,
+                f"Assigned '{assigned_title}' - collided with another file matched to the exact same "
+                f"title this run [{match_method}]",
+            ),
+        )
+        for _pdf_file, match_method, new_filename, assigned_title in collision_suffixed
+    ]
+    remaining_candidates = list(all_titles)
+    confirmed, _switch_to_auto, _remaining = _review_files_with_picker(
+        items, output_directory, fingerprint_cache, scan_index, renaming_in_place, remaining_candidates, all_titles,
+    )
+    return confirmed
 
 
 def review_unmatched_interactively(unmatched, output_directory, fingerprint_cache, scan_index, renaming_in_place, unclaimed_titles, all_titles):
@@ -3347,6 +3429,26 @@ def run_matching_agent():
         print(f"  ({already_correct_count} of those were already correctly named - nothing to rename.)")
     print("==================================================")
     _report_progress("Finished", total_files, total_files)
+
+    # A file execute_renames gave a numbered "(2)"/"(3)" suffix collided
+    # with another file THIS RUN also confidently matched to the exact
+    # same title - the only legitimate reason for that is a genuine
+    # duplicate PDF, so it's a strong signal at least one of the two was
+    # actually misidentified, not proof either one is correct. Detected
+    # here by comparing each result's real on-disk name against what
+    # safe_pdf_filename(its own resolved title) would be WITHOUT a
+    # collision suffix, rather than touching execute_renames' own return
+    # value - already_correct files are excluded since those were never
+    # renamed to begin with, so they can't have been suffixed.
+    collision_suffixed = [
+        (pdf_file, match_method, new_filename, plan_targets[pdf_file])
+        for pdf_file, match_method, new_filename, already_correct in results
+        if new_filename and not already_correct and plan_targets.get(pdf_file)
+        and new_filename != safe_pdf_filename(plan_targets[pdf_file])
+    ]
+    review_collision_suffixed_files(
+        collision_suffixed, OUTPUT_DIRECTORY, fingerprint_cache, scan_index, renaming_in_place, all_titles
+    )
 
     plan_paths = {pdf_file: full_pdf_path for pdf_file, full_pdf_path, *_rest in plans}
     unmatched = [
