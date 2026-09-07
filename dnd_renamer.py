@@ -2919,6 +2919,95 @@ def _run_parallel_scan(file_pairs, dispatch, init_fn, init_args, progress_verb="
     return plans, file_hashes, cache_hits
 
 
+def identify_non_pdf_software_items(pdf_directory, output_directory, xml_items, image_library):
+    """Finds and renames non-PDF files (shortcuts, installers, ISOs -
+    any extension at all) sitting in pdf_directory that correspond to a
+    catalog entry with no PDF of its own (is_pdf_product: False - see
+    load_launchbox_db) - things like "AD&D Core Rules 2.0 Expansion" or
+    "Forgotten Realms - Interactive Atlas", which the rest of this tool
+    never looks at, since it only ever scans *.pdf.
+
+    There's no way to verify one of these by content the way a scanned
+    PDF's text/OCR/cover art can be - a shortcut or installer has none
+    of that to offer - so filename is the only signal available at all,
+    and this only ever acts on an exact or unambiguous close match
+    (same spirit as the PDF pipeline's own last-resort legacy filename
+    layer): a filename that could plausibly mean more than one catalog
+    entry (or none at all) is left completely alone rather than guessed
+    at. Silent when nothing matches - most of what's in a real folder
+    won't be one of these, and that's not worth reporting as a problem.
+    Returns the count actually renamed."""
+    non_pdf_items = [item for item in xml_items if not item.get('is_pdf_product', True)]
+    if not non_pdf_items:
+        return 0
+
+    ignored_filenames = {"thumbs.db", "desktop.ini"}
+    try:
+        candidates = [
+            f for f in os.listdir(pdf_directory)
+            if not f.lower().endswith('.pdf')
+            and f.lower() not in ignored_filenames
+            and os.path.isfile(os.path.join(pdf_directory, f))
+        ]
+    except OSError:
+        return 0
+
+    renamed_count = 0
+    claimed_titles = set()
+    for filename in candidates:
+        stem, ext = os.path.splitext(filename)
+        clean_name = clean_string(stem)
+        if len(clean_name) < 4:
+            continue  # too short/generic to mean anything - see the PDF fallback layers' own guard
+
+        exact = [
+            item for item in non_pdf_items
+            if clean_name == item['clean_title'] or clean_name == item.get('application_filename_clean')
+        ]
+        if len(exact) == 1:
+            best_match = exact[0]
+        else:
+            substring_matches = [
+                item for item in non_pdf_items
+                if item['clean_title'] and (item['clean_title'] in clean_name or clean_name in item['clean_title'])
+            ]
+            if not substring_matches:
+                continue
+            # Prefer the more specific (longer) title when more than one
+            # matches - e.g. a file for "Core Rules - CD-ROM 2.0" also
+            # substring-matches the shorter, unrelated "Core Rules -
+            # CD-ROM" entry purely because that shorter title happens to
+            # be a prefix of it. An actual tie is genuinely ambiguous,
+            # not just a prefix relationship, so it's left alone.
+            substring_matches.sort(key=lambda item: len(item['clean_title']), reverse=True)
+            if len(substring_matches) > 1 and len(substring_matches[0]['clean_title']) == len(substring_matches[1]['clean_title']):
+                continue
+            best_match = substring_matches[0]
+
+        target_title = resolve_display_name(best_match, image_library)
+        if target_title in claimed_titles:
+            continue  # already claimed by another file this run - don't create a duplicate
+        safe_title = "".join(c for c in target_title if c not in '<>:"/\\|?*').strip()
+        new_filename = f"{safe_title}{ext}"
+        claimed_titles.add(target_title)
+        if new_filename == filename:
+            continue  # already correctly named
+        new_path = os.path.join(output_directory, new_filename)
+        if os.path.exists(new_path):
+            continue  # something's already there - don't overwrite or guess a numbered suffix
+        try:
+            os.rename(os.path.join(pdf_directory, filename), new_path)
+        except Exception as e:
+            print(f"  Failed to rename '{filename}': {e}")
+            continue
+        print(f"✅ [Non-PDF Software Item Match] '{filename}'  ->  '{new_filename}'")
+        renamed_count += 1
+
+    if renamed_count:
+        print(f"\nIdentified and renamed {renamed_count} non-PDF software item(s) by filename match.")
+    return renamed_count
+
+
 def run_matching_agent():
     print("==================================================")
     print("  LaunchBox D&D Omni-Method Renamer Agent v22.0   ")
@@ -2951,6 +3040,13 @@ def run_matching_agent():
         print("   copying the PDFs to local storage first will speed this up. (Files")
         print("   that need OCR won't see much difference either way, since Tesseract's")
         print("   own recognition time dominates those regardless of storage location.)")
+
+    # A handful of catalog entries are pure software (a CD-ROM/installer
+    # shortcut, no PDF of their own - see is_pdf_product) - the rest of
+    # this run never looks at them since it only scans *.pdf. Identified
+    # separately, by filename only (there's no content to check), right
+    # here rather than folded into the main PDF pipeline below.
+    identify_non_pdf_software_items(PDF_DIRECTORY, OUTPUT_DIRECTORY, xml_items, image_library)
 
     pdf_files = [f for f in os.listdir(PDF_DIRECTORY) if f.lower().endswith('.pdf')]
     total_files = len(pdf_files)
