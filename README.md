@@ -140,6 +140,15 @@ file..." forever if the skip-already-correct filter happened to skip
 every remaining file after the last one you actually reviewed, since
 nothing was left to close the dialog in that case.
 
+[**v1.8.0**](https://github.com/malarrya/dnd-pdf-renamer/releases/tag/v1.8.0)
+fixes brief command-prompt windows flashing on screen during OCR
+fallback, makes the picker's front-page thumbnail clickable to view it
+at full resolution instead of only the small thumbnail, and adds a
+"Keep Current Name" button next to Skip - unlike Skip (leaves the file
+unresolved, so a future run asks about it again), this treats the
+file's current name as a confirmed match and caches it, without
+renaming anything.
+
 If you installed v1.0.0 and hit an infinite "Press Enter to continue" loop
 that kept re-spawning itself, update to v1.0.1 or later - that version was
 missing `multiprocessing.freeze_support()`, so a worker process would fail
