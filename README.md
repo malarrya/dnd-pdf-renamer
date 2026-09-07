@@ -158,6 +158,15 @@ small logo, watermark, low-res thumbnail, or mask alongside the actual
 page image. Both now pick the largest embedded image on the page
 instead of whichever one happened to come first internally.
 
+[**v1.9.0**](https://github.com/malarrya/dnd-pdf-renamer/releases/tag/v1.9.0)
+identifies non-PDF catalog entries too - a handful of LaunchBox entries
+have no PDF at all, just a CD-ROM/installer shortcut (e.g. "AD&D Core
+Rules 2.0 Expansion"), which every previous version silently ignored
+since it only ever looked at `*.pdf` files. Every run now also matches
+any non-PDF file in your folder against those entries by filename alone
+(there's no content to check), acting only on an exact or unambiguous
+match and leaving anything uncertain untouched.
+
 If you installed v1.0.0 and hit an infinite "Press Enter to continue" loop
 that kept re-spawning itself, update to v1.0.1 or later - that version was
 missing `multiprocessing.freeze_support()`, so a worker process would fail
