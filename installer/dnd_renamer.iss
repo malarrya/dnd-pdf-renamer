@@ -13,7 +13,7 @@
 ; risks a shortcut/registry path pointing at a name that's since changed.
 
 #define MyAppName "D&D Renamer"
-#define MyAppVersion "1.12.0"
+#define MyAppVersion "1.13.0"
 #define MyAppExeName "dnd_renamer.exe"
 
 [Setup]
