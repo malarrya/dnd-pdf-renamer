@@ -273,6 +273,22 @@ made the app appear to hang immediately whenever manual mode was
 selected and any numbered-suffix collision already existed on disk.
 Both dialogs now use the same fix as the picker.
 
+[**v1.14.0**](https://github.com/malarrya/dnd-pdf-renamer/releases/tag/v1.14.0)
+adds three improvements from a broader review of the app. Some catalog
+titles are shared by 2+ distinct entries that differ only by product
+code or a printing/cover variant (e.g. a regular vs. "Orange Spine"
+printing, or a book re-issued under a different TSR code) - a match
+landing on one of these now always requires manual confirmation, with a
+note naming the sibling(s), even if the automated match would otherwise
+look confident, since the safety margin that normally guards against a
+wrong guess is measured against the highest-scoring *unrelated* book,
+not necessarily against the true sibling. Per-run log files, which
+previously accumulated forever, are now pruned automatically down to
+the most recent 20. And every rename applied during a run (automated or
+via any review path) is now recorded, with a new "Undo Last Run..."
+button on the setup screen to reverse them safely whenever there's
+something to revert.
+
 If you installed v1.0.0 and hit an infinite "Press Enter to continue" loop
 that kept re-spawning itself, update to v1.0.1 or later - that version was
 missing `multiprocessing.freeze_support()`, so a worker process would fail
