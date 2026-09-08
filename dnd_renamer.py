@@ -40,7 +40,7 @@ if sys.stdin is None:
 # fully unified into one place without a lot more machinery than a
 # solo-maintained release process actually needs. Bump this alongside
 # that file, in the same commit, every time.
-APP_VERSION = "1.11.0"
+APP_VERSION = "1.11.1"
 
 # --- REQUIRED: PDF READING ---
 # Unlike the OCR/cover-hash fallbacks below, nothing in this script can run
