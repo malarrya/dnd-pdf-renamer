@@ -179,6 +179,18 @@ confirming re-affirms a real duplicate, picking or typing anything else
 corrects the misidentification and overwrites whatever was already
 cached for it.
 
+If you installed v1.10.0, update to
+[**v1.11.0**](https://github.com/malarrya/dnd-pdf-renamer/releases/tag/v1.11.0)
+or later - that version's collision review only ever looked at the file
+that got the numbered suffix, but the actual misidentification is just
+as often the one that WON the plain name instead, which was never even
+shown. Every file in a title collision is now reviewed, not just the
+suffixed ones. This release also shows the app's version in its window
+titles, and the downloadable installer's own filename is now version-
+stamped (e.g. `DnD_Renamer_Setup_v1.11.0.exe`) so multiple versions in
+a Downloads folder stay distinguishable - the installed copy keeps a
+stable filename every version, so upgrades and shortcuts are unaffected.
+
 If you installed v1.0.0 and hit an infinite "Press Enter to continue" loop
 that kept re-spawning itself, update to v1.0.1 or later - that version was
 missing `multiprocessing.freeze_support()`, so a worker process would fail
