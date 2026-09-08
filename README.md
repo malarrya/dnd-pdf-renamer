@@ -289,6 +289,23 @@ via any review path) is now recorded, with a new "Undo Last Run..."
 button on the setup screen to reverse them safely whenever there's
 something to revert.
 
+[**v1.14.1**](https://github.com/malarrya/dnd-pdf-renamer/releases/tag/v1.14.1)
+fixes a real, reported bug in the non-PDF software item matcher
+(shortcuts/installers with no PDF of their own, like "Core Rules -
+CD-ROM"). A shortcut file named without its product code (e.g. "Core
+Rules - CD-ROM.lnk" for TSR2167) could never exact-match its own
+catalog entry, since that check compared against a title string that
+still carries the product code. It fell through to a substring-based
+fallback that prefers the longer of two matching titles as "more
+specific" - but here, both TSR2167 and the unrelated TSR2176 ("Core
+Rules - CD-ROM 2.0") coincidentally contain the same core words, so the
+fallback picked the longer, wrong entry purely because it had more
+text. The real "2.0" file then claimed that same title for real,
+leaving the short file's genuine match already taken and the file
+itself silently unrenamed. The exact-match check now also compares
+against each entry's product-code-stripped title, so a filename with no
+code in it resolves correctly before ever reaching that heuristic.
+
 If you installed v1.0.0 and hit an infinite "Press Enter to continue" loop
 that kept re-spawning itself, update to v1.0.1 or later - that version was
 missing `multiprocessing.freeze_support()`, so a worker process would fail
