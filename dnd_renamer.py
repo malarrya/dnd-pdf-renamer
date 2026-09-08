@@ -2466,6 +2466,24 @@ def review_low_confidence_matches(results, output_directory, image_library, plan
     if not candidates:
         return results
 
+    # Reordered, best-effort, the same way _order_plain_before_numbered_
+    # suffix reorders review_all_manually's list - a low-confidence
+    # rename can land on "Title.pdf" while another low-confidence rename
+    # this same run lands on "Title (2).pdf", and a human confirming the
+    # "(2)" one first (this uses a plain confirm/reject dialog, not the
+    # searchable picker, so there's no "show all titles" hint that a
+    # sibling even exists) has no way of knowing about the other yet.
+    # Only reorders within THIS function's own candidates - a genuine
+    # collision against a file that got a HIGH-confidence match instead
+    # (never a candidate here at all) is still caught correctly by
+    # run_matching_agent's own dedicated collision review later on.
+    new_filenames = [results[i][2] for i in candidates]
+    ordered_filenames = _order_plain_before_numbered_suffix(new_filenames)
+    order_index = {}
+    for name in ordered_filenames:
+        order_index.setdefault(name, len(order_index))
+    candidates = sorted(candidates, key=lambda i: order_index[results[i][2]])
+
     print(f"\n{len(candidates)} file(s) this run were renamed based on a low-confidence guess.")
     if _confirm_yesno("Review and confirm which are correct, so they're trusted next time?") != "yes":
         print("Skipping review.")
@@ -2951,6 +2969,18 @@ def review_unmatched_interactively(unmatched, output_directory, fingerprint_cach
     different, review-specific set of files)."""
     if not unmatched:
         return 0
+
+    # Reordered so a file with an on-disk numbered-suffix sibling is
+    # reviewed with the plain-named one first - see
+    # _order_plain_before_numbered_suffix's own docstring for why this
+    # can't be left to chance (a suffixed file can sort before its own
+    # plain sibling even alphabetically). "Unmatched" doesn't mean
+    # "can't be part of an existing collision" - a file that failed
+    # automated identification this run can just as easily have a
+    # numbered-suffix sibling left over from an earlier one.
+    ordered_names = _order_plain_before_numbered_suffix([pdf_file for pdf_file, _fp in unmatched])
+    order_index = {name: i for i, name in enumerate(ordered_names)}
+    unmatched = sorted(unmatched, key=lambda item: order_index[item[0]])
 
     print(f"\n{len(unmatched)} file(s) couldn't be confidently matched.")
     if _confirm_yesno("Review them one at a time, picking the correct title from the catalog?") != "yes":
@@ -3596,10 +3626,6 @@ def run_matching_agent():
     print("==================================================")
     _report_progress("Finished", total_files, total_files)
 
-    _check_and_review_numbered_suffix_collisions(
-        OUTPUT_DIRECTORY, fingerprint_cache, scan_index, renaming_in_place, all_titles,
-    )
-
     plan_paths = {pdf_file: full_pdf_path for pdf_file, full_pdf_path, *_rest in plans}
     unmatched = [
         (pdf_file, plan_paths[pdf_file])
@@ -3620,6 +3646,21 @@ def run_matching_agent():
     unclaimed_titles = [title for title in all_titles if title not in claimed_titles]
     review_unmatched_interactively(
         unmatched, OUTPUT_DIRECTORY, fingerprint_cache, scan_index, renaming_in_place, unclaimed_titles, all_titles
+    )
+
+    # Run LAST, after review_unmatched_interactively rather than before it -
+    # a real, reproduced gap: this used to run right after the finished-
+    # summary print above, which put it BEFORE review_unmatched_interactively
+    # instead of after. review_unmatched_interactively's own picker can
+    # create a fresh numbered-suffix collision the same way review_all_
+    # manually's can (a human can pick a title whose plain filename is
+    # already taken, bumping the new one to "(2)"), and with the check
+    # positioned before it, that fresh collision sat unreviewed until the
+    # very start of the NEXT run instead of being caught in this one - the
+    # 100%-manual-mode branch above never had this gap, since its own
+    # collision check already ran after review_all_manually, not before.
+    _check_and_review_numbered_suffix_collisions(
+        OUTPUT_DIRECTORY, fingerprint_cache, scan_index, renaming_in_place, all_titles,
     )
 
 
