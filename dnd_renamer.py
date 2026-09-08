@@ -2744,49 +2744,82 @@ def review_all_manually(pdf_files, pdf_directory, output_directory, fingerprint_
     )
 
 
-def find_title_collision_group_members(results, plan_targets):
-    """Every file, from a single run's results, that shares its
-    resolved target title (plan_targets) with at least one other file
-    from that same run - i.e. every member of every title collision
-    execute_renames had to resolve with a numbered suffix, not just the
-    suffixed side of it. See review_collision_suffixed_files for why
-    reviewing only the suffixed side misses the file that's just as
-    likely to actually be the wrong one: whichever one happened to win
-    the plain name. Returns a list of (pdf_file, match_method,
-    new_filename, target_title)."""
-    by_target_title = {}
-    for pdf_file, match_method, new_filename, _already_correct in results:
-        target_title = plan_targets.get(pdf_file)
-        if new_filename and target_title:
-            by_target_title.setdefault(target_title, []).append((pdf_file, match_method, new_filename))
+NUMBERED_SUFFIX_RE = re.compile(r'^(.*) \((\d+)\)\.pdf$', re.IGNORECASE)
 
-    return [
-        (pdf_file, match_method, new_filename, target_title)
-        for target_title, members in by_target_title.items()
-        if len(members) > 1
-        for pdf_file, match_method, new_filename in members
-    ]
+
+def find_numbered_suffix_collisions_on_disk(output_directory):
+    """Every file CURRENTLY sitting in output_directory as part of a
+    numbered-suffix collision - "Title.pdf" existing alongside "Title
+    (2).pdf" (and "(3)", etc.) - found by listing the folder directly,
+    not by inferring collisions from any one run's own match bookkeeping
+    (plan_targets). That earlier approach could miss a real, currently-
+    existing collision: a file's scan_index/fingerprint-cache entry from
+    a PAST run (right or wrong) makes an unchanged file's cached title
+    trusted via the incremental-scan shortcut without ever being
+    reconsidered, and string-for-string equality between that stale
+    cached title and a freshly-resolved one isn't guaranteed to hold
+    forever (e.g. after a display-name-resolution fix ships). Reading
+    the actual folder instead sidesteps all of that - "Title.pdf" and
+    "Title (2).pdf" both existing right now is a fact, not an inference,
+    regardless of which run (if any) created either of them or what any
+    cache currently claims about them.
+
+    Returns a list of (pdf_file, match_method, new_filename,
+    target_title) - the same shape review_collision_suffixed_files
+    already expects - sorted so the PLAIN-named file in each group comes
+    first: that one never went through any collision-avoidance renaming
+    at all, so it's exactly as likely to be the actual misidentification
+    as any "(2)"/"(3)" sibling, and reviewing it first is what actually
+    frees up the plain name for a genuinely-correct suffixed sibling to
+    reclaim in the same session, rather than needing a second pass."""
+    try:
+        files = os.listdir(output_directory)
+    except OSError:
+        return []
+    pdf_files_lower = {f.lower() for f in files if f.lower().endswith('.pdf')}
+
+    groups = {}  # base title -> set of real on-disk filenames
+    for f in files:
+        match = NUMBERED_SUFFIX_RE.match(f)
+        if not match:
+            continue
+        base = match.group(1)
+        plain_name = f"{base}.pdf"
+        if plain_name.lower() in pdf_files_lower:
+            members = groups.setdefault(base, set())
+            members.add(plain_name)
+            members.add(f)
+
+    result = []
+    for base, members in groups.items():
+        # Plain name first (see docstring), then the numbered variants
+        # in ascending order.
+        ordered = sorted(members, key=lambda name: (name != f"{base}.pdf", name))
+        for member in ordered:
+            result.append((member, "Numbered-suffix collision", member, base))
+    return result
 
 
 def review_collision_suffixed_files(collision_suffixed, output_directory, fingerprint_cache, scan_index, renaming_in_place, all_titles):
-    """Post-rename review step: whenever two (or more) files THIS SAME
-    RUN were both confidently matched to the exact same catalog title,
-    execute_renames lets only one keep the plain name and suffixes the
-    rest "(2)"/"(3)" - the only legitimate reason that happens at all is
-    a genuine duplicate PDF, so it's a strong signal at least one of
-    them was actually misidentified. Critically, the culprit is just as
-    often the one that WON the plain name as the one that got bumped -
-    every member of the collision is reviewed here, not only the
-    suffixed ones, since reviewing just the losing side can never
-    surface (or fix) a wrong match sitting on the plain name: the
-    correctly-identified suffixed file would just get sent right back
-    to "(2)" every time, since the actual problem was its unreviewed
-    sibling the whole time. Nothing upstream ever puts any of this in
-    front of a human on its own - run_matching_agent seeds the
-    fingerprint cache from every confirmed match under its resolved
-    title regardless of whether that title collided with anything, so a
-    wrong match here would otherwise get cached and trusted completely
-    silently.
+    """Post-rename review step: "Title.pdf" and "Title (2).pdf" both
+    existing at once means two different files were both identified as
+    the exact same catalog title - the only legitimate reason that's
+    possible at all is a genuine duplicate PDF, so it's a strong signal
+    at least one of them is actually misidentified. Critically, the
+    culprit is just as often the one that HAS the plain name as the one
+    with a "(2)"/"(3)" suffix - every member of the collision is
+    reviewed here, not only the suffixed ones, since reviewing just the
+    suffixed side can never surface (or fix) a wrong match sitting on
+    the plain name: a correctly-identified suffixed file would just get
+    sent right back to "(2)" every time, since the actual problem was
+    its unreviewed sibling the whole time. Nothing upstream ever puts
+    any of this in front of a human on its own - a confirmed match gets
+    cached under its resolved title regardless of whether that title
+    collides with anything already on disk, so a wrong match here would
+    otherwise get cached and trusted completely silently, for as long as
+    the collision itself has been sitting there (found via
+    find_numbered_suffix_collisions_on_disk - a real, present-tense
+    collision, not just one this specific run happened to create).
 
     Shows the picker for each file, with the title it was actually
     assigned pre-selected: confirming it re-affirms that file as correct
@@ -2794,21 +2827,26 @@ def review_collision_suffixed_files(collision_suffixed, output_directory, finger
     suffixed unless/until its colliding sibling is corrected first, at
     which point a later review of it can reclaim the plain name), while
     picking or typing anything else corrects a real misidentification -
-    which also overwrites whatever the automated pass already cached
-    for that file's content hash, via the exact same rename/cache/
-    scan-index bookkeeping every other picker-driven review already
-    uses. collision_suffixed is a list of (pdf_file, match_method,
-    new_filename, assigned_title) for EVERY file in a collision group -
-    new_filename is that file's current on-disk name (suffixed or not);
-    assigned_title is the shared title the group collided on, pre-
-    selected as the guess. Returns the number confirmed (renamed-to-
-    something-else or re-affirmed)."""
+    which also overwrites whatever was already cached for that file's
+    content hash, via the exact same rename/cache/scan-index bookkeeping
+    every other picker-driven review already uses. The plain-named file
+    in each group is always ordered first (see
+    find_numbered_suffix_collisions_on_disk) precisely so fixing it, if
+    it's the actual culprit, frees up the plain name in time for a
+    genuinely-correct suffixed sibling reviewed right after it to
+    reclaim it in this same session. collision_suffixed is a list of
+    (pdf_file, match_method, new_filename, assigned_title) for EVERY
+    file in a collision group - new_filename is that file's current
+    on-disk name (suffixed or not); assigned_title is the shared title
+    the group collided on, pre-selected as the guess. Returns the number
+    confirmed (renamed-to-something-else or re-affirmed)."""
     if not collision_suffixed:
         return 0
 
-    print(f"\n{len(collision_suffixed)} file(s) were matched to a title at least one other file this run "
-          f"was ALSO matched to - usually a sign at least one of them was actually misidentified (the "
-          f"file that kept the plain name is just as likely to be the wrong one as any \"(2)\"/\"(3)\" sibling).")
+    print(f"\n{len(collision_suffixed)} file(s) are sitting under a name at least one other file also "
+          f"currently has (a plain title and its \"(2)\"/\"(3)\" sibling both existing) - usually a sign "
+          f"at least one of them is actually misidentified (the file with the plain name is just as "
+          f"likely to be the wrong one as any suffixed sibling).")
     if _confirm_yesno("Review them one at a time to confirm or correct?") != "yes":
         print("Skipping review.")
         return 0
@@ -2819,8 +2857,7 @@ def review_collision_suffixed_files(collision_suffixed, output_directory, finger
             os.path.join(output_directory, new_filename),
             (
                 assigned_title,
-                f"Assigned '{assigned_title}' - collided with another file matched to the exact same "
-                f"title this run [{match_method}]",
+                f"Assigned '{assigned_title}' - collides with another file currently sharing that same title",
             ),
         )
         for _pdf_file, match_method, new_filename, assigned_title in collision_suffixed
@@ -3473,7 +3510,7 @@ def run_matching_agent():
     print("==================================================")
     _report_progress("Finished", total_files, total_files)
 
-    collision_suffixed = find_title_collision_group_members(results, plan_targets)
+    collision_suffixed = find_numbered_suffix_collisions_on_disk(OUTPUT_DIRECTORY)
     review_collision_suffixed_files(
         collision_suffixed, OUTPUT_DIRECTORY, fingerprint_cache, scan_index, renaming_in_place, all_titles
     )
