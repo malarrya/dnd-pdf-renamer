@@ -191,6 +191,21 @@ stamped (e.g. `DnD_Renamer_Setup_v1.11.0.exe`) so multiple versions in
 a Downloads folder stay distinguishable - the installed copy keeps a
 stable filename every version, so upgrades and shortcuts are unaffected.
 
+If you installed v1.11.0, update to
+[**v1.11.1**](https://github.com/malarrya/dnd-pdf-renamer/releases/tag/v1.11.1)
+or later - that version's collision review inferred collisions from a
+single run's own match bookkeeping, which could miss a file whose
+stale, previously-cached identity was trusted via the incremental-scan
+shortcut without ever being reconsidered - confirming its "(2)" sibling
+just sent it right back to "(2)" every time, since the actual culprit
+was never shown for review at all. Collisions are now detected directly
+from the folder - "Title.pdf" existing alongside "Title (2).pdf" is a
+real collision regardless of what any run or cache currently claims -
+and the plain-named file in each group is always reviewed first, so
+fixing it (when it's the actual misidentification) frees up the plain
+name in time for a genuinely-correct suffixed sibling to reclaim it in
+the same session.
+
 If you installed v1.0.0 and hit an infinite "Press Enter to continue" loop
 that kept re-spawning itself, update to v1.0.1 or later - that version was
 missing `multiprocessing.freeze_support()`, so a worker process would fail
