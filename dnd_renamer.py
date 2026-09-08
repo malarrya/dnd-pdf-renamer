@@ -32,6 +32,16 @@ if sys.stderr is None:
 if sys.stdin is None:
     sys.stdin = open(os.devnull, "r")
 
+# The single source of truth for the app's version - shown in the GUI's
+# window titles (see dnd_renamer_gui.py) and, separately, kept in sync
+# by hand with installer/dnd_renamer.iss's own MyAppVersion (which also
+# names the built installer/exe) every release - Inno Setup can't read
+# a Python source file's constant at compile time, so this can't be
+# fully unified into one place without a lot more machinery than a
+# solo-maintained release process actually needs. Bump this alongside
+# that file, in the same commit, every time.
+APP_VERSION = "1.10.0"
+
 # --- REQUIRED: PDF READING ---
 # Unlike the OCR/cover-hash fallbacks below, nothing in this script can run
 # at all without this - so a missing pypdf isn't allowed to degrade
@@ -621,7 +631,7 @@ def configure_paths():
 
     if not reconfigure:
         if confirm_paths_gui is not None:
-            choice, manual_mode = confirm_paths_gui(config)
+            choice, manual_mode = confirm_paths_gui(config, APP_VERSION)
             if choice is None:
                 print("\nCancelled.")
                 sys.exit(1)
@@ -650,7 +660,7 @@ def configure_paths():
 
         if configure_paths_gui is not None:
             print("\nOpening the setup window...\n")
-            new_config, manual_mode = configure_paths_gui(config, stale=stale)
+            new_config, manual_mode = configure_paths_gui(config, APP_VERSION, stale=stale)
             if new_config is None:
                 print("Cancelled.")
                 sys.exit(1)
@@ -2734,38 +2744,71 @@ def review_all_manually(pdf_files, pdf_directory, output_directory, fingerprint_
     )
 
 
-def review_collision_suffixed_files(collision_suffixed, output_directory, fingerprint_cache, scan_index, renaming_in_place, all_titles):
-    """Post-rename review step: execute_renames only ever adds a
-    numbered "(2)"/"(3)" suffix when two different files THIS SAME RUN
-    were both confidently matched to the exact same catalog title - the
-    only way that's legitimate is a genuine duplicate PDF, so a suffix
-    is a strong signal at least one of them was actually misidentified,
-    not proof either one is correct. Nothing upstream ever puts that in
-    front of a human on its own - run_matching_agent seeds the
-    fingerprint cache from every confirmed match under its INTENDED
-    (pre-suffix) title regardless of whether that title collided with
-    anything, so a wrong match here would otherwise get cached and
-    trusted completely silently.
+def find_title_collision_group_members(results, plan_targets):
+    """Every file, from a single run's results, that shares its
+    resolved target title (plan_targets) with at least one other file
+    from that same run - i.e. every member of every title collision
+    execute_renames had to resolve with a numbered suffix, not just the
+    suffixed side of it. See review_collision_suffixed_files for why
+    reviewing only the suffixed side misses the file that's just as
+    likely to actually be the wrong one: whichever one happened to win
+    the plain name. Returns a list of (pdf_file, match_method,
+    new_filename, target_title)."""
+    by_target_title = {}
+    for pdf_file, match_method, new_filename, _already_correct in results:
+        target_title = plan_targets.get(pdf_file)
+        if new_filename and target_title:
+            by_target_title.setdefault(target_title, []).append((pdf_file, match_method, new_filename))
 
-    Shows the picker for each one, with the title it was actually
-    assigned pre-selected: confirming it re-affirms a genuine duplicate
-    (the file simply keeps its already-suffixed name), while picking or
-    typing anything else corrects a real misidentification - which also
-    overwrites whatever the automated pass already cached for that
-    file's content hash, via the exact same rename/cache/scan-index
-    bookkeeping every other picker-driven review already uses.
-    collision_suffixed is a list of (pdf_file, match_method,
-    new_filename, assigned_title) - new_filename is the file's current,
-    already-suffixed on-disk name; assigned_title is the clean title it
-    was actually matched to (what collided), pre-selected as the guess.
-    Returns the number confirmed (renamed-to-something-else or
-    re-affirmed)."""
+    return [
+        (pdf_file, match_method, new_filename, target_title)
+        for target_title, members in by_target_title.items()
+        if len(members) > 1
+        for pdf_file, match_method, new_filename in members
+    ]
+
+
+def review_collision_suffixed_files(collision_suffixed, output_directory, fingerprint_cache, scan_index, renaming_in_place, all_titles):
+    """Post-rename review step: whenever two (or more) files THIS SAME
+    RUN were both confidently matched to the exact same catalog title,
+    execute_renames lets only one keep the plain name and suffixes the
+    rest "(2)"/"(3)" - the only legitimate reason that happens at all is
+    a genuine duplicate PDF, so it's a strong signal at least one of
+    them was actually misidentified. Critically, the culprit is just as
+    often the one that WON the plain name as the one that got bumped -
+    every member of the collision is reviewed here, not only the
+    suffixed ones, since reviewing just the losing side can never
+    surface (or fix) a wrong match sitting on the plain name: the
+    correctly-identified suffixed file would just get sent right back
+    to "(2)" every time, since the actual problem was its unreviewed
+    sibling the whole time. Nothing upstream ever puts any of this in
+    front of a human on its own - run_matching_agent seeds the
+    fingerprint cache from every confirmed match under its resolved
+    title regardless of whether that title collided with anything, so a
+    wrong match here would otherwise get cached and trusted completely
+    silently.
+
+    Shows the picker for each file, with the title it was actually
+    assigned pre-selected: confirming it re-affirms that file as correct
+    (a plain-named file simply keeps its name; a suffixed one stays
+    suffixed unless/until its colliding sibling is corrected first, at
+    which point a later review of it can reclaim the plain name), while
+    picking or typing anything else corrects a real misidentification -
+    which also overwrites whatever the automated pass already cached
+    for that file's content hash, via the exact same rename/cache/
+    scan-index bookkeeping every other picker-driven review already
+    uses. collision_suffixed is a list of (pdf_file, match_method,
+    new_filename, assigned_title) for EVERY file in a collision group -
+    new_filename is that file's current on-disk name (suffixed or not);
+    assigned_title is the shared title the group collided on, pre-
+    selected as the guess. Returns the number confirmed (renamed-to-
+    something-else or re-affirmed)."""
     if not collision_suffixed:
         return 0
 
-    print(f"\n{len(collision_suffixed)} file(s) were renamed with a numbered suffix (e.g. \"... (2).pdf\") "
-          f"because another file this run was ALSO matched to the exact same title - usually a sign at "
-          f"least one of them was actually misidentified.")
+    print(f"\n{len(collision_suffixed)} file(s) were matched to a title at least one other file this run "
+          f"was ALSO matched to - usually a sign at least one of them was actually misidentified (the "
+          f"file that kept the plain name is just as likely to be the wrong one as any \"(2)\"/\"(3)\" sibling).")
     if _confirm_yesno("Review them one at a time to confirm or correct?") != "yes":
         print("Skipping review.")
         return 0
@@ -3430,22 +3473,7 @@ def run_matching_agent():
     print("==================================================")
     _report_progress("Finished", total_files, total_files)
 
-    # A file execute_renames gave a numbered "(2)"/"(3)" suffix collided
-    # with another file THIS RUN also confidently matched to the exact
-    # same title - the only legitimate reason for that is a genuine
-    # duplicate PDF, so it's a strong signal at least one of the two was
-    # actually misidentified, not proof either one is correct. Detected
-    # here by comparing each result's real on-disk name against what
-    # safe_pdf_filename(its own resolved title) would be WITHOUT a
-    # collision suffix, rather than touching execute_renames' own return
-    # value - already_correct files are excluded since those were never
-    # renamed to begin with, so they can't have been suffixed.
-    collision_suffixed = [
-        (pdf_file, match_method, new_filename, plan_targets[pdf_file])
-        for pdf_file, match_method, new_filename, already_correct in results
-        if new_filename and not already_correct and plan_targets.get(pdf_file)
-        and new_filename != safe_pdf_filename(plan_targets[pdf_file])
-    ]
+    collision_suffixed = find_title_collision_group_members(results, plan_targets)
     review_collision_suffixed_files(
         collision_suffixed, OUTPUT_DIRECTORY, fingerprint_cache, scan_index, renaming_in_place, all_titles
     )

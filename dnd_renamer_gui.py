@@ -122,7 +122,7 @@ def _center_on_parent(dialog, parent):
     dialog.geometry(f"+{x}+{y}")
 
 
-def configure_paths_gui(config, stale=False):
+def configure_paths_gui(config, app_version, stale=False):
     """Shows one browsable field per FIELDS entry, pre-filled from
     `config`, plus a checkbox offering to skip the automated scan
     entirely and manually identify every file by hand instead (see
@@ -134,7 +134,7 @@ def configure_paths_gui(config, stale=False):
     not a durable setting like the paths are."""
     result = {"config": None, "manual_mode": False}
 
-    root = _new_window("D&D Renamer - Setup")
+    root = _new_window(f"D&D Renamer v{app_version} - Setup")
 
     main = ttk.Frame(root, padding=16)
     main.pack(fill="both", expand=True)
@@ -197,7 +197,7 @@ def configure_paths_gui(config, stale=False):
     return result["config"], result["manual_mode"]
 
 
-def confirm_paths_gui(config):
+def confirm_paths_gui(config, app_version):
     """Shows the already-valid saved paths read-only, with a choice to
     keep them or edit them, plus a checkbox offering to skip the
     automated scan entirely and manually identify every file by hand
@@ -208,7 +208,7 @@ def confirm_paths_gui(config):
     the paths are."""
     result = {"choice": None, "manual_mode": False}
 
-    root = _new_window("D&D Renamer - Setup")
+    root = _new_window(f"D&D Renamer v{app_version} - Setup")
 
     main = ttk.Frame(root, padding=6)
     main.pack(fill="both", expand=True)
@@ -563,7 +563,7 @@ def _show_picker_dialog(root, request, picker_ctx, dnd_renamer):
 
     if picker_ctx.get("dialog") is None:
         dialog = tk.Toplevel(root)
-        dialog.title("Identify This File")
+        dialog.title(f"Identify This File - D&D Renamer v{dnd_renamer.APP_VERSION}")
         # .transient() ties this dialog's minimize/restore behavior to
         # root and keeps it off the taskbar as its own entry - wanted
         # whenever root is actually on screen, but reproduced and
@@ -1068,7 +1068,7 @@ def run_scan_window(run_fn, dnd_renamer):
     except (ValueError, OSError):
         pass  # not on the main thread, or not supported here - the Cancel button still works
 
-    root = _new_window("D&D Renamer - Running")
+    root = _new_window(f"D&D Renamer v{dnd_renamer.APP_VERSION} - Running")
     # A fixed height set explicitly (rather than measuring pack()'s own
     # natural size, which proved unreliable here - see git history) plus
     # matching maxsize keeps the initial layout from shifting on the

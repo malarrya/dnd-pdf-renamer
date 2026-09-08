@@ -1,8 +1,16 @@
 # Building the Windows installer
 
-This produces `installer/output/DnD_Renamer_Setup.exe` - a standalone installer
-that needs nothing pre-installed (no Python, no pip packages) and, if the user
-opts in, installs the Tesseract OCR engine for them too.
+This produces `installer/output/DnD_Renamer_Setup_v<version>.exe` (e.g.
+`DnD_Renamer_Setup_v1.10.0.exe`) - a standalone installer that needs nothing
+pre-installed (no Python, no pip packages) and, if the user opts in, installs
+the Tesseract OCR engine for them too. The version comes from `dnd_renamer.iss`'s
+own `MyAppVersion` - keep that in sync with `dnd_renamer.py`'s `APP_VERSION`
+(shown in the app's own window titles) by hand, in the same commit, every
+release; nothing currently unifies the two into one place. The *installed*
+copy inside `{app}` keeps a stable `dnd_renamer.exe` name every version
+(see `MyAppExeName` in the .iss) - only the downloadable installer itself is
+version-stamped, so an in-place upgrade never risks a shortcut pointing at a
+name that's since changed.
 
 ## 1. Build the standalone exe
 
@@ -41,7 +49,7 @@ JRSoftware.InnoSetup.7`). Then:
 "C:\Users\<you>\AppData\Local\Programs\Inno Setup 7\ISCC.exe" installer\dnd_renamer.iss
 ```
 
-Output: `installer\output\DnD_Renamer_Setup.exe`. It installs the exe plus
+Output: `installer\output\DnD_Renamer_Setup_v<version>.exe`. It installs the exe plus
 `README.md` and the two `.example.json` files, creates Start Menu / optional
 Desktop shortcuts, and - if the user leaves the "Install Tesseract OCR"
 task checked - runs `winget install UB-Mannheim.TesseractOCR` silently after

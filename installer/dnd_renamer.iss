@@ -4,7 +4,13 @@
 ; dnd_renamer --icon installer\icon.ico dnd_renamer.py` has produced
 ; dist\dnd_renamer.exe):
 ;   "C:\Users\<you>\AppData\Local\Programs\Inno Setup 7\ISCC.exe" installer\dnd_renamer.iss
-; Output lands in installer\output\DnD_Renamer_Setup.exe.
+; Output lands in installer\output\DnD_Renamer_Setup_v<version>.exe - the
+; version-stamped OutputBaseFilename below, not a fixed name, so multiple
+; downloaded installers sitting in the same folder (e.g. Downloads) stay
+; distinguishable. The INSTALLED copy inside {app} keeps the stable
+; dnd_renamer.exe name every version (see MyAppExeName) - only the
+; downloadable installer itself is versioned, so upgrading in place never
+; risks a shortcut/registry path pointing at a name that's since changed.
 
 #define MyAppName "D&D Renamer"
 #define MyAppVersion "1.10.0"
@@ -21,7 +27,7 @@ DefaultGroupName={#MyAppName}
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=commandline
 OutputDir=output
-OutputBaseFilename=DnD_Renamer_Setup
+OutputBaseFilename=DnD_Renamer_Setup_v{#MyAppVersion}
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
