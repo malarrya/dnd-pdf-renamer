@@ -218,6 +218,17 @@ checkbox exists specifically to override that - exactly how a
 numbered-suffix collision can happen by hand. The review now also runs
 at the end of a 100%-manual session.
 
+If you installed v1.11.2, update to
+[**v1.12.0**](https://github.com/malarrya/dnd-pdf-renamer/releases/tag/v1.12.0)
+or later - reviewing a pre-existing "Title.pdf" / "Title (2).pdf"
+collision could show you the "(2)" file BEFORE its plain-named sibling,
+since a space sorts before a period and neither the folder listing nor
+a plain alphabetical sort guarantees the plain name comes first. You'd
+have no way of knowing the plain-named sibling even existed yet. The
+plain-named file is now always shown first whenever it has an on-disk
+numbered-suffix sibling, for the same reason the post-scan collision
+review already orders that way.
+
 If you installed v1.0.0 and hit an infinite "Press Enter to continue" loop
 that kept re-spawning itself, update to v1.0.1 or later - that version was
 missing `multiprocessing.freeze_support()`, so a worker process would fail
