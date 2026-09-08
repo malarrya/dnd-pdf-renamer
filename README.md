@@ -241,6 +241,21 @@ literally the same content - reporting it as a plain count instead of
 asking about it, so confirming a duplicate once doesn't mean being
 asked again on every future run forever.
 
+[**v1.13.1**](https://github.com/malarrya/dnd-pdf-renamer/releases/tag/v1.13.1)
+closes two gaps left by v1.13.0. The plain-before-suffix review ordering
+from v1.12.0 only ever applied to 100%-manual mode - it's now applied in
+the automated scan's other two review paths as well ("couldn't be
+confidently matched" picker review, and "confirm this low-confidence
+rename" dialog), so a "(2)" file can't surface before its plain-named
+sibling there either. Separately, the automated pipeline's on-disk
+collision check used to run before that "couldn't be confidently
+matched" review instead of after it, so a fresh collision created by
+that review's own picker (assigning a title whose plain filename was
+already taken) went unreviewed until the next run instead of being
+caught immediately. The check now runs last, after every review step,
+so any collision created during a run is always caught before that run
+finishes.
+
 If you installed v1.0.0 and hit an infinite "Press Enter to continue" loop
 that kept re-spawning itself, update to v1.0.1 or later - that version was
 missing `multiprocessing.freeze_support()`, so a worker process would fail
