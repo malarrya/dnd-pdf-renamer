@@ -3412,6 +3412,22 @@ def identify_non_pdf_software_items(pdf_directory, output_directory, xml_items, 
         exact = [
             item for item in non_pdf_items
             if clean_name == item['clean_title'] or clean_name == item.get('application_filename_clean')
+            # clean_title (unlike core_title) is never stripped of its
+            # product code - a shortcut file named without the code at
+            # all (e.g. "Core Rules - CD-ROM.lnk" for TSR2167) would
+            # otherwise never exact-match here, even though it
+            # unambiguously means exactly one catalog entry. Confirmed a
+            # real, reported bug: without this, that file fell through
+            # to the substring/length heuristic below, which - since
+            # "core rules cd rom" is coincidentally a substring of BOTH
+            # this entry's own clean_title AND the unrelated "Core Rules
+            # - CD-ROM 2.0"'s (which is longer purely because it has
+            # more text, not because it's the better match) - picked the
+            # wrong, longer entry instead, silently stealing the short
+            # file's real match and leaving it unrenamed once that
+            # target was then already claimed by the "2.0" file's own
+            # correct match.
+            or clean_name == item['core_title']
         ]
         if len(exact) == 1:
             best_match = exact[0]
