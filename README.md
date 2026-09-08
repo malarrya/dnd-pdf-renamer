@@ -206,6 +206,18 @@ fixing it (when it's the actual misidentification) frees up the plain
 name in time for a genuinely-correct suffixed sibling to reclaim it in
 the same session.
 
+If you installed v1.11.1, update to
+[**v1.11.2**](https://github.com/malarrya/dnd-pdf-renamer/releases/tag/v1.11.2)
+or later - that version's collision review had a real gap: 100%-manual
+mode returns as soon as it finishes, before ever reaching the
+collision-detection code, so for anyone using manual mode the review
+never ran at all, no matter how many times a "(2)" file was reviewed.
+Manual mode's own candidate pool normally stops two files from claiming
+the same title, but the picker's "also show already-claimed titles"
+checkbox exists specifically to override that - exactly how a
+numbered-suffix collision can happen by hand. The review now also runs
+at the end of a 100%-manual session.
+
 If you installed v1.0.0 and hit an infinite "Press Enter to continue" loop
 that kept re-spawning itself, update to v1.0.1 or later - that version was
 missing `multiprocessing.freeze_support()`, so a worker process would fail
