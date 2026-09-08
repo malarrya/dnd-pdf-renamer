@@ -361,7 +361,18 @@ def _show_yesno_dialog(root, message, allow_stop):
 
     dialog = tk.Toplevel(root)
     dialog.title("D&D Renamer")
-    dialog.transient(root)
+    # See the picker dialog's own comment on this exact same guard (below,
+    # in _make_picker_hook's dialog-creation code) - a Toplevel made
+    # transient to an ALREADY-withdrawn root (a 100%-manual run - see
+    # run_scan_window) gets stuck withdrawn itself on Windows, and
+    # deiconify() afterward doesn't undo it. This is exactly what a
+    # manual-mode run's very first "Review them one at a time to confirm
+    # or correct?" collision-review prompt hits (dnd_renamer.
+    # _check_and_review_numbered_suffix_collisions runs before anything
+    # else, while root is still withdrawn) - a real, reported bug: the
+    # process kept running with no window ever appearing.
+    if root.state() != "withdrawn":
+        dialog.transient(root)
 
     main = ttk.Frame(dialog, padding=10)
     main.pack(fill="both")
@@ -404,7 +415,11 @@ def _show_confirm_dialog(root, request):
 
     dialog = tk.Toplevel(root)
     dialog.title("Confirm Suggestion")
-    dialog.transient(root)
+    # See _show_yesno_dialog's comment on this same guard - a Toplevel
+    # made transient to an already-withdrawn root gets stuck withdrawn
+    # itself on Windows.
+    if root.state() != "withdrawn":
+        dialog.transient(root)
 
     main = ttk.Frame(dialog, padding=10)
     main.pack(fill="both")
