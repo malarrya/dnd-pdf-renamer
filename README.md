@@ -256,6 +256,23 @@ caught immediately. The check now runs last, after every review step,
 so any collision created during a run is always caught before that run
 finishes.
 
+[**v1.13.2**](https://github.com/malarrya/dnd-pdf-renamer/releases/tag/v1.13.2)
+fixes a real, reported showstopper: after checking "Manually identify
+every file myself" and launching, the app could appear to do nothing -
+the process ran in Task Manager but no window ever showed. In a 100%-
+manual run, the main "Running" window is deliberately hidden at the
+start, since the picker dialogs are meant to be the only visible thing
+during manual review - but on Windows, a dialog made "transient" to an
+already-hidden parent window gets stuck hidden itself and never
+reappears. A previous fix already avoided this for the file-
+identification picker dialog specifically, but two sibling dialogs -
+the plain Yes/No prompt and the low-confidence-match confirmation
+dialog - never got the same fix. Since v1.13.0's collision-review
+feature runs a Yes/No prompt as the very first thing in every run, this
+made the app appear to hang immediately whenever manual mode was
+selected and any numbered-suffix collision already existed on disk.
+Both dialogs now use the same fix as the picker.
+
 If you installed v1.0.0 and hit an infinite "Press Enter to continue" loop
 that kept re-spawning itself, update to v1.0.1 or later - that version was
 missing `multiprocessing.freeze_support()`, so a worker process would fail
