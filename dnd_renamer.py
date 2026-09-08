@@ -3242,6 +3242,19 @@ def run_matching_agent():
             print(f"  Finished. Manually identified {confirmed} of {total_files} PDFs.")
             print("==================================================")
             _report_progress("Finished", total_files, total_files)
+            # This early return skipped the collision review entirely
+            # for a 100%-manual run - a real, reproduced bug: manual
+            # mode's own remaining_candidates pool normally prevents two
+            # files from claiming the same title, but the picker's
+            # "also show already-claimed titles" checkbox exists
+            # specifically to let a human override that (a genuine
+            # duplicate, or fixing an earlier bad claim) - which is
+            # exactly how a numbered-suffix collision can still happen
+            # by hand, and it was never getting caught below at all.
+            review_collision_suffixed_files(
+                find_numbered_suffix_collisions_on_disk(OUTPUT_DIRECTORY),
+                OUTPUT_DIRECTORY, fingerprint_cache, scan_index, renaming_in_place, all_titles,
+            )
             return
         # The picker's "Back to Automated Scan" button - the automated
         # pipeline below picks up exactly where manual review left off,
