@@ -2718,6 +2718,7 @@ def review_all_manually(pdf_files, pdf_directory, output_directory, fingerprint_
 
     if not pdf_files:
         return 0, False, []
+    pdf_files = _order_plain_before_numbered_suffix(pdf_files)
     items = [(pdf_file, os.path.join(pdf_directory, pdf_file), None) for pdf_file in pdf_files]
     remaining_candidates = list(all_titles)
 
@@ -2745,6 +2746,33 @@ def review_all_manually(pdf_files, pdf_directory, output_directory, fingerprint_
 
 
 NUMBERED_SUFFIX_RE = re.compile(r'^(.*) \((\d+)\)\.pdf$', re.IGNORECASE)
+
+
+def _order_plain_before_numbered_suffix(pdf_files):
+    """Reorders pdf_files (filenames, no path) so that, for any file
+    with an on-disk numbered-suffix sibling ("Title.pdf" alongside
+    "Title (2).pdf"), the plain one is always reviewed before its
+    suffixed sibling(s). Directory listing order doesn't guarantee this
+    on its own - a suffixed file can easily sort BEFORE its own plain
+    sibling in a plain lexicographic sort, since the space in " (2)"
+    (0x20) sorts before the period in ".pdf" (0x2E) - confirmed a real,
+    reproduced source of confusion: a human reviewing a pre-existing
+    collision could hit the suffixed file first with no idea a plain-
+    named sibling existed at all yet. Fixing the plain one first, if
+    it's the actual culprit, is what frees up the plain name in time
+    for its genuinely-correct sibling (reviewed right after) to reclaim
+    it - the same reasoning find_numbered_suffix_collisions_on_disk's
+    own ordering already uses for the post-scan cleanup pass, applied
+    here to the FIRST time either file is ever seen. Uses a stable sort,
+    so anything not part of a detected collision keeps its original
+    relative order."""
+    pdf_files_lower = {f.lower() for f in pdf_files}
+    suffixed = set()
+    for f in pdf_files:
+        match = NUMBERED_SUFFIX_RE.match(f)
+        if match and f"{match.group(1)}.pdf".lower() in pdf_files_lower:
+            suffixed.add(f)
+    return sorted(pdf_files, key=lambda f: f in suffixed)
 
 
 def find_numbered_suffix_collisions_on_disk(output_directory):
