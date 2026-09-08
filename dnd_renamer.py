@@ -2792,18 +2792,28 @@ def find_numbered_suffix_collisions_on_disk(output_directory):
     regardless of which run (if any) created either of them or what any
     cache currently claims about them.
 
-    Returns a list of (pdf_file, match_method, new_filename,
-    target_title) - the same shape review_collision_suffixed_files
-    already expects - sorted so the PLAIN-named file in each group comes
-    first: that one never went through any collision-avoidance renaming
-    at all, so it's exactly as likely to be the actual misidentification
-    as any "(2)"/"(3)" sibling, and reviewing it first is what actually
-    frees up the plain name for a genuinely-correct suffixed sibling to
-    reclaim in the same session, rather than needing a second pass."""
+    Returns (needs_review, duplicate_group_count). needs_review is a
+    list of (pdf_file, match_method, new_filename, target_title) - the
+    same shape review_collision_suffixed_files already expects - sorted
+    so the PLAIN-named file in each group comes first: that one never
+    went through any collision-avoidance renaming at all, so it's
+    exactly as likely to be the actual misidentification as any
+    "(2)"/"(3)" sibling, and reviewing it first is what actually frees
+    up the plain name for a genuinely-correct suffixed sibling to
+    reclaim in the same session, rather than needing a second pass.
+
+    A group where every file is BYTE-IDENTICAL is excluded from
+    needs_review entirely and counted in duplicate_group_count instead -
+    there's no "which one is actually correct" question to put in front
+    of a human when both files are literally the same content, just two
+    copies of one PDF (confirmed a real, reproduced case: without this,
+    a human confirming a genuine duplicate today would just be asked
+    about the exact same pair again on every future run forever, since
+    confirming it doesn't - and shouldn't - remove either copy)."""
     try:
         files = os.listdir(output_directory)
     except OSError:
-        return []
+        return [], 0
     pdf_files_lower = {f.lower() for f in files if f.lower().endswith('.pdf')}
 
     groups = {}  # base title -> set of real on-disk filenames
@@ -2819,13 +2829,33 @@ def find_numbered_suffix_collisions_on_disk(output_directory):
             members.add(f)
 
     result = []
+    duplicate_group_count = 0
     for base, members in groups.items():
         # Plain name first (see docstring), then the numbered variants
         # in ascending order.
         ordered = sorted(members, key=lambda name: (name != f"{base}.pdf", name))
+        hashes = {hash_file_sha256(os.path.join(output_directory, name)) for name in ordered}
+        if len(hashes) == 1 and None not in hashes:
+            duplicate_group_count += 1
+            continue
         for member in ordered:
             result.append((member, "Numbered-suffix collision", member, base))
-    return result
+    return result, duplicate_group_count
+
+
+def _check_and_review_numbered_suffix_collisions(output_directory, fingerprint_cache, scan_index, renaming_in_place, all_titles):
+    """Shared by run_matching_agent's three call sites for this check
+    (once at the very start of a run, once more in the 100%-manual
+    early-return path, and again at the end of the automated pipeline) -
+    keeps the "byte-identical duplicates found" note from needing to be
+    repeated at each one."""
+    needs_review, duplicate_group_count = find_numbered_suffix_collisions_on_disk(output_directory)
+    if duplicate_group_count:
+        print(f"\n({duplicate_group_count} pair(s) of files sharing a title are byte-identical "
+              f"duplicates of each other - nothing to review, just two copies of the same file.)")
+    review_collision_suffixed_files(
+        needs_review, output_directory, fingerprint_cache, scan_index, renaming_in_place, all_titles,
+    )
 
 
 def review_collision_suffixed_files(collision_suffixed, output_directory, fingerprint_cache, scan_index, renaming_in_place, all_titles):
@@ -3238,9 +3268,6 @@ def run_matching_agent():
     # here rather than folded into the main PDF pipeline below.
     identify_non_pdf_software_items(PDF_DIRECTORY, OUTPUT_DIRECTORY, xml_items, image_library)
 
-    pdf_files = [f for f in os.listdir(PDF_DIRECTORY) if f.lower().endswith('.pdf')]
-    total_files = len(pdf_files)
-
     # The scan index (see load_scan_index) only means anything for files
     # that stay put after being confirmed - if the output folder is
     # somewhere else, a confirmed file is moved out of PDF_DIRECTORY
@@ -3251,6 +3278,25 @@ def run_matching_agent():
     )
     scan_index = load_scan_index(SCAN_INDEX_PATH) if renaming_in_place else {}
     all_titles = sorted({resolve_display_name(item, image_library) for item in xml_items})
+
+    # Catch any numbered-suffix collision already sitting in the folder
+    # from a PAST run, before doing anything else - this is a cheap,
+    # disk-only check (no OCR/content analysis needed), so there's no
+    # reason to make a human wait through an entire fresh scan (or a
+    # 100%-manual pass over the whole collection) before ever being
+    # offered a chance to fix something that's been sitting there all
+    # along. The exact same check also runs again at the end of this
+    # function, for anything THIS run's own matching newly creates.
+    _check_and_review_numbered_suffix_collisions(
+        OUTPUT_DIRECTORY, fingerprint_cache, scan_index, renaming_in_place, all_titles,
+    )
+
+    # Re-listed AFTER that review, not before - a rename there changes
+    # what's actually on disk, and a stale listing would otherwise still
+    # hand the just-fixed (or now-differently-named) files' OLD names
+    # into the scan/manual-review pipeline below.
+    pdf_files = [f for f in os.listdir(PDF_DIRECTORY) if f.lower().endswith('.pdf')]
+    total_files = len(pdf_files)
 
     # Normally already decided by the checkbox on the GUI setup/confirm
     # screen (see configure_paths()) - MANUAL_MODE is only ever still
@@ -3279,8 +3325,7 @@ def run_matching_agent():
             # duplicate, or fixing an earlier bad claim) - which is
             # exactly how a numbered-suffix collision can still happen
             # by hand, and it was never getting caught below at all.
-            review_collision_suffixed_files(
-                find_numbered_suffix_collisions_on_disk(OUTPUT_DIRECTORY),
+            _check_and_review_numbered_suffix_collisions(
                 OUTPUT_DIRECTORY, fingerprint_cache, scan_index, renaming_in_place, all_titles,
             )
             return
@@ -3551,9 +3596,8 @@ def run_matching_agent():
     print("==================================================")
     _report_progress("Finished", total_files, total_files)
 
-    collision_suffixed = find_numbered_suffix_collisions_on_disk(OUTPUT_DIRECTORY)
-    review_collision_suffixed_files(
-        collision_suffixed, OUTPUT_DIRECTORY, fingerprint_cache, scan_index, renaming_in_place, all_titles
+    _check_and_review_numbered_suffix_collisions(
+        OUTPUT_DIRECTORY, fingerprint_cache, scan_index, renaming_in_place, all_titles,
     )
 
     plan_paths = {pdf_file: full_pdf_path for pdf_file, full_pdf_path, *_rest in plans}
