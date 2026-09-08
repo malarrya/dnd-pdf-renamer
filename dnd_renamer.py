@@ -348,6 +348,18 @@ CACHE_PATH = os.path.join(_APP_DIR, "dnd_renamer_cache.json")
 # scans.
 SCAN_INDEX_PATH = os.path.join(_APP_DIR, "dnd_renamer_scan_index.json")
 
+# See save_last_run_manifest/undo_last_run - a record of every rename the
+# most recent run actually applied, so it can be reversed. Only ever
+# describes ONE run (the last one that renamed anything), not a full
+# history - overwritten each time, never appended to.
+LAST_RUN_MANIFEST_PATH = os.path.join(_APP_DIR, "dnd_renamer_last_run.json")
+
+# Shared with dnd_renamer_gui.py's run_scan_window (the only place a log
+# file is actually created) so prune_old_logs below is glob-matching the
+# exact same naming scheme, not a separately-maintained copy of it.
+LOG_FILE_PREFIX = "dnd_renamer_log_"
+LOG_RETENTION_COUNT = 20
+
 # Optional hooks consumed by a GUI (see dnd_renamer_gui.py's
 # run_scan_window). PROGRESS_HOOK, if set, is called as (phase: str,
 # completed: int, total: int) at each scan/rename/suggestion progress
@@ -396,6 +408,19 @@ PICKER_HOOK = None
 REVEAL_WINDOW_HOOK = None
 CANCEL_EVENT = threading.Event()
 PAUSE_EVENT = threading.Event()
+
+# Every (old_name, new_name) rename _review_files_with_picker itself
+# applies during this run - the automated pipeline's own renames don't
+# need this, since they're already fully recoverable from execute_renames'
+# own results list, but the picker (shared by manual review, unmatched
+# review, and collision review) renames a file directly with no such list
+# ever handed back to run_matching_agent. Reset at the start of every run
+# (see run_matching_agent) and folded into that run's undo manifest at
+# the end (see save_last_run_manifest/undo_last_run) - a plain module-
+# level list, same pattern as the hooks above, rather than threading a
+# return value through three separate review functions that don't
+# otherwise need to know about each other.
+_PICKER_RENAME_LEDGER = []
 
 
 def _report_progress(phase, completed, total):
@@ -631,7 +656,11 @@ def configure_paths():
 
     if not reconfigure:
         if confirm_paths_gui is not None:
-            choice, manual_mode = confirm_paths_gui(config, APP_VERSION)
+            # Same reasoning as run_scan_window's own dnd_renamer parameter -
+            # passing this module's own object rather than letting
+            # confirm_paths_gui `import dnd_renamer` itself, which wouldn't
+            # find this file's own __main__ instance when run directly.
+            choice, manual_mode = confirm_paths_gui(config, APP_VERSION, sys.modules[__name__])
             if choice is None:
                 print("\nCancelled.")
                 sys.exit(1)
@@ -968,6 +997,129 @@ def save_scan_index(path, index):
         print(f"⚠️  Could not save scan index: {e}")
 
 
+def prune_old_logs(app_dir=None, keep=None):
+    """Deletes all but the `keep` most recent per-run log files (see
+    dnd_renamer_gui.run_scan_window) - nothing else ever cleaned these up,
+    so a machine this runs on regularly just accumulated one every run
+    forever. Sorting by filename works because the timestamp embedded in
+    it (see LOG_FILE_PREFIX's use in run_scan_window) is already
+    zero-padded/fixed-width and lexicographic order matches chronological
+    order. Best-effort: a log that can't be deleted (e.g. still open, or
+    a permissions issue) is skipped rather than raised, since this is
+    housekeeping, not something worth failing a run over."""
+    app_dir = app_dir if app_dir is not None else _APP_DIR
+    keep = keep if keep is not None else LOG_RETENTION_COUNT
+    try:
+        logs = sorted(
+            f for f in os.listdir(app_dir)
+            if f.startswith(LOG_FILE_PREFIX) and f.lower().endswith(".txt")
+        )
+    except OSError:
+        return
+    for name in logs[:-keep] if keep > 0 else logs:
+        try:
+            os.remove(os.path.join(app_dir, name))
+        except OSError:
+            pass
+
+
+def save_last_run_manifest(output_directory, renamed_pairs):
+    """Records every (old_name, new_name) rename actually applied by this
+    run, so undo_last_run can reverse them later. Only written when there
+    actually were any - a run that renamed nothing leaves the previous
+    run's manifest (and its undo option) intact rather than erasing it,
+    since "undo the last run" should mean the last run that changed
+    anything, not just whichever one happened to be launched most
+    recently."""
+    if not renamed_pairs:
+        return
+    try:
+        with open(LAST_RUN_MANIFEST_PATH, "w", encoding="utf-8") as f:
+            json.dump({"output_directory": output_directory, "renames": renamed_pairs}, f, indent=2)
+    except OSError as e:
+        print(f"⚠️  Could not save the undo record for this run: {e}")
+
+
+def load_last_run_manifest():
+    """Returns {"output_directory": ..., "renames": [[old, new], ...]} or
+    None if there's nothing to undo (no manifest, or an unreadable one -
+    treated the same as "nothing to undo" rather than an error, since a
+    corrupt leftover file shouldn't block using the app)."""
+    if not os.path.exists(LAST_RUN_MANIFEST_PATH):
+        return None
+    try:
+        with open(LAST_RUN_MANIFEST_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and isinstance(data.get("renames"), list) and data.get("output_directory"):
+            return data
+    except Exception:
+        pass
+    return None
+
+
+def undo_last_run():
+    """Reverses every rename recorded in the last run's manifest (see
+    save_last_run_manifest), then deletes the manifest so the same undo
+    can't be replayed twice. Reuses execute_renames itself for the actual
+    file moves - reversing is just another batch of renames (new_name ->
+    old_name), so it gets the exact same collision-safe two-phase
+    handling and Ctrl+C-safe rollback for free, instead of a second,
+    separately-maintained implementation of the same logic. Callable
+    before a run even starts (e.g. from the setup screen) as well as
+    between runs, so it loads/saves the scan index itself rather than
+    depending on run_matching_agent's own copy of it.
+
+    A pair is silently skipped (not treated as an error) when new_name no
+    longer exists under that name - something else has already touched
+    it since (a later manual rename, another undo, the file being moved
+    away) - reversing it now would either do nothing or, worse, silently
+    overwrite whatever's actually there. The scan index has the now-stale
+    entries for whatever just got renamed away dropped (it's keyed by
+    filename, so those would otherwise point at names that no longer
+    exist - the fingerprint cache needs no equivalent cleanup, since it's
+    keyed by content hash, and an undo never changes a file's bytes).
+
+    Returns (undone_count, skipped_count) - both 0 with no manifest
+    present at all."""
+    manifest = load_last_run_manifest()
+    if manifest is None:
+        return 0, 0
+
+    output_directory = manifest["output_directory"]
+    pairs = [(old, new) for old, new in manifest["renames"] if old != new]
+    undo_plans = [
+        (new, os.path.join(output_directory, new), os.path.splitext(old)[0], "Undo Last Run")
+        for old, new in pairs
+        if os.path.isfile(os.path.join(output_directory, new))
+    ]
+    skipped = len(pairs) - len(undo_plans)
+
+    results, cancelled = execute_renames(undo_plans, output_directory)
+    undone_names = {pdf_file for pdf_file, _method, new_filename, already_correct in results if new_filename and not already_correct}
+
+    if undone_names:
+        scan_index = load_scan_index(SCAN_INDEX_PATH)
+        index_changed = False
+        for name in undone_names:
+            if scan_index.pop(name, None) is not None:
+                index_changed = True
+        if index_changed:
+            save_scan_index(SCAN_INDEX_PATH, scan_index)
+
+    if cancelled:
+        # Whatever was reverted before Ctrl+C stays reverted (execute_renames
+        # never leaves a half-finished rename); what didn't get to run yet
+        # simply stays as it was. Not deleting the manifest here means a
+        # second "Undo Last Run" can pick up wherever this one stopped.
+        return len(undone_names), skipped
+
+    try:
+        os.remove(LAST_RUN_MANIFEST_PATH)
+    except OSError:
+        pass
+    return len(undone_names), skipped
+
+
 def partition_for_incremental_scan(pdf_files, pdf_directory, scan_index, fingerprint_cache):
     """Splits pdf_files into (skip_plans, to_scan_files) for an incremental
     scan. skip_plans is in the same (pdf_file, full_pdf_path,
@@ -1284,6 +1436,51 @@ def resolve_display_name(xml_item, image_library):
         if xml_item['core_title'] and xml_item['core_title'] in img['clean_name']:
             return img['original_name']
     return xml_item['title'].replace(':', ' -')
+
+
+def build_ambiguous_title_notes(xml_items, image_library):
+    """Some catalog titles are shared by 2+ distinct <Game> entries that
+    differ only by product code or a printing/cover variant (e.g. a
+    regular vs. "Orange Spine" printing, or a book re-issued under a
+    different TSR code - see the Player's Handbook/Monster Manual/DMG
+    Orange Spine pairs and the Lankhmar/Player Character Record Sheets
+    renumbering, all confirmed in the real catalog). Their Title/Notes
+    text is identical, so automated content matching can't reliably
+    tell them apart even when its score margin looks comfortable - that
+    margin is measured against the highest-scoring UNRELATED book, not
+    necessarily against the true sibling, so a confident-looking match
+    here is riskier than the same confidence anywhere else.
+
+    Returns {resolved_display_name: note} for every display name that
+    has at least one such sibling, where `note` names the sibling(s) -
+    used by run_matching_agent to force this file through manual
+    confirmation regardless of how confident the automated match looked,
+    with a note explaining why, rather than silently trusting a margin
+    that may only look safe by coincidence."""
+    by_core = {}
+    for item in xml_items:
+        if not item['is_pdf_product']:
+            continue
+        by_core.setdefault(item['core_title'], []).append(item)
+
+    notes = {}
+    for items in by_core.values():
+        if len(items) < 2:
+            continue
+        display_names = sorted({resolve_display_name(item, image_library) for item in items})
+        if len(display_names) < 2:
+            # Every entry resolved to the identical name - nothing to
+            # distinguish (the numbered-suffix collision handling deals
+            # with that case instead).
+            continue
+        for name in display_names:
+            others = [n for n in display_names if n != name]
+            notes[name] = (
+                f"{len(display_names)} catalog entries share this title (also in the catalog: "
+                f"{'; '.join(others)}) - a known printing/cover/product-code variant. Verify which "
+                f"one this file actually is (check the cover, spine, or copyright page) before confirming."
+            )
+    return notes
 
 
 def build_idf_table(xml_items):
@@ -2664,6 +2861,8 @@ def _review_files_with_picker(
         except Exception as e:
             print(f"  Failed to rename: {e}")
             continue
+        if new_filename != pdf_file:
+            _PICKER_RENAME_LEDGER.append((pdf_file, new_filename))
 
         confirmed += 1
         if source and chosen_title == initial_guess:
@@ -3264,10 +3463,14 @@ def run_matching_agent():
     print("==================================================\n")
     _report_progress("Loading catalog", 0, 0)
 
+    # Starts empty every run - see _PICKER_RENAME_LEDGER's own comment.
+    _PICKER_RENAME_LEDGER.clear()
+
     image_library = load_image_library(IMAGE_DIRECTORY)
     xml_items = load_launchbox_db(XML_PATH)
     mark_generic_placeholders_with_siblings(xml_items)
     idf_table = build_idf_table(xml_items)
+    ambiguous_title_notes = build_ambiguous_title_notes(xml_items, image_library)
     fingerprint_cache = load_fingerprint_cache(CACHE_PATH)
 
     print(f"Loaded {len(image_library)} Image names and {len(xml_items)} XML entries.")
@@ -3358,6 +3561,7 @@ def run_matching_agent():
             _check_and_review_numbered_suffix_collisions(
                 OUTPUT_DIRECTORY, fingerprint_cache, scan_index, renaming_in_place, all_titles,
             )
+            save_last_run_manifest(OUTPUT_DIRECTORY, list(_PICKER_RENAME_LEDGER))
             return
         # The picker's "Back to Automated Scan" button - the automated
         # pipeline below picks up exactly where manual review left off,
@@ -3530,6 +3734,35 @@ def run_matching_agent():
     plan_by_name = {p[0]: p for p in skip_plans + scanned_plans}
     plans = [plan_by_name[pdf_file] for pdf_file in pdf_files]
 
+    # Force manual confirmation for anything landing on a known-ambiguous
+    # title (see build_ambiguous_title_notes) even if the automated match
+    # was otherwise confident - reusing the exact "(low confidence)" tag
+    # review_low_confidence_matches already looks for, so this flows
+    # through the identical confirm-dialog/caching-exclusion machinery a
+    # genuinely low-scoring guess gets, with no changes needed there.
+    # Skipped for a "Fingerprint Cache" method (both an in-scan cache hit
+    # and an incremental-scan skip use that same prefix - see
+    # partition_for_incremental_scan) since that means a human already
+    # confirmed this exact file once before; re-prompting forever would
+    # defeat the whole point of caching. Also skipped for "Omni-
+    # Verification" (the Deities & Demigods page-count override, the one
+    # ambiguous title with an actual evidence-based way to tell its
+    # variants apart) - that layer already resolved the ambiguity itself
+    # rather than getting lucky on an unrelated-book margin, so it
+    # shouldn't be second-guessed by the generic check.
+    plans = [
+        (pdf_file, full_pdf_path, target,
+         f"{match_method} (low confidence) - Ambiguous title: {ambiguous_title_notes[target]}")
+        if (
+            target and target in ambiguous_title_notes
+            and "(low confidence)" not in match_method
+            and not match_method.startswith("Fingerprint Cache")
+            and not match_method.startswith("Omni-Verification")
+        )
+        else (pdf_file, full_pdf_path, target, match_method)
+        for pdf_file, full_pdf_path, target, match_method in plans
+    ]
+
     print(f"Scan complete - identifying names for {total_files} PDFs.\n")
     if cache_hits:
         print(f"({cache_hits} of those were instant fingerprint-cache hits.)\n")
@@ -3662,6 +3895,18 @@ def run_matching_agent():
     _check_and_review_numbered_suffix_collisions(
         OUTPUT_DIRECTORY, fingerprint_cache, scan_index, renaming_in_place, all_titles,
     )
+
+    # Everything execute_renames itself applied earlier in this run, plus
+    # whatever the picker applied afterward (low-confidence/collision/
+    # unmatched review, all covered by now - this runs after every review
+    # step above) - see _PICKER_RENAME_LEDGER's own comment for why the
+    # picker's share needs a separate ledger instead of also coming from
+    # a results list.
+    automated_pairs = [
+        (pdf_file, new_filename) for pdf_file, _method, new_filename, already_correct in results
+        if new_filename and not already_correct
+    ]
+    save_last_run_manifest(OUTPUT_DIRECTORY, automated_pairs + list(_PICKER_RENAME_LEDGER))
 
 
 if __name__ == "__main__":

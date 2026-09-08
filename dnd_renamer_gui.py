@@ -197,7 +197,7 @@ def configure_paths_gui(config, app_version, stale=False):
     return result["config"], result["manual_mode"]
 
 
-def confirm_paths_gui(config, app_version):
+def confirm_paths_gui(config, app_version, dnd_renamer):
     """Shows the already-valid saved paths read-only, with a choice to
     keep them or edit them, plus a checkbox offering to skip the
     automated scan entirely and manually identify every file by hand
@@ -205,7 +205,11 @@ def confirm_paths_gui(config, app_version):
     (choice, manual_mode): choice is "continue", "change", or None if
     the user cancelled/closed the window; manual_mode is never saved to
     disk - it's a fresh choice every run, not a durable setting like
-    the paths are."""
+    the paths are.
+
+    `dnd_renamer` must be the caller's own module object (see
+    run_scan_window's docstring for why this can't just be imported by
+    name here instead) - used for the optional "Undo Last Run" button."""
     result = {"choice": None, "manual_mode": False}
 
     root = _new_window(f"D&D Renamer v{app_version} - Setup")
@@ -235,10 +239,35 @@ def confirm_paths_gui(config, app_version):
 
     button_row = ttk.Frame(main)
     button_row.grid(row=len(FIELDS) + 2, column=0, columnspan=2, sticky="e", pady=(4, 0))
+
+    # Only offered while there's actually something to undo - see
+    # dnd_renamer.save_last_run_manifest (only written when a run renamed
+    # at least one file) and undo_last_run (deletes it once applied, so
+    # this naturally disappears again right after).
+    manifest = dnd_renamer.load_last_run_manifest()
+    if manifest is not None:
+        def do_undo():
+            count = len(manifest["renames"])
+            if not messagebox.askyesno(
+                "D&D Renamer",
+                f"Undo the last run? This will reverse {count} rename(s) in:\n{manifest['output_directory']}",
+                parent=root,
+            ):
+                return
+            undone, skipped = dnd_renamer.undo_last_run()
+            message = f"Reverted {undone} of {count} rename(s)."
+            if skipped:
+                message += f"\n{skipped} file(s) had already changed since and were left alone."
+            messagebox.showinfo("D&D Renamer", message, parent=root)
+            undo_button.destroy()
+
+        undo_button = ttk.Button(button_row, text="Undo Last Run...", command=do_undo)
+        undo_button.grid(row=0, column=0, padx=(0, 8))
+
     ttk.Button(button_row, text="Change Settings...", command=lambda: choose("change")).grid(
-        row=0, column=0, padx=(0, 8)
+        row=0, column=1, padx=(0, 8)
     )
-    ttk.Button(button_row, text="Continue", command=lambda: choose("continue")).grid(row=0, column=1)
+    ttk.Button(button_row, text="Continue", command=lambda: choose("continue")).grid(row=0, column=2)
 
     root.protocol("WM_DELETE_WINDOW", root.destroy)
     _center(root)
@@ -1060,8 +1089,9 @@ def run_scan_window(run_fn, dnd_renamer):
     # and it keeps growing for the rest of the run whether or not "View
     # Full Log" is ever clicked. Named per-run (timestamped) so it
     # doesn't collide with or overwrite a previous run's log.
+    dnd_renamer.prune_old_logs()
     log_file_path = os.path.join(
-        dnd_renamer._APP_DIR, f"dnd_renamer_log_{time.strftime('%Y%m%d_%H%M%S')}.txt"
+        dnd_renamer._APP_DIR, f"{dnd_renamer.LOG_FILE_PREFIX}{time.strftime('%Y%m%d_%H%M%S')}.txt"
     )
     try:
         log_file = open(log_file_path, "w", encoding="utf-8")
