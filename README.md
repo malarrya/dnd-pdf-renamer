@@ -229,6 +229,18 @@ plain-named file is now always shown first whenever it has an on-disk
 numbered-suffix sibling, for the same reason the post-scan collision
 review already orders that way.
 
+[**v1.13.0**](https://github.com/malarrya/dnd-pdf-renamer/releases/tag/v1.13.0)
+makes collision handling fully automatic. Existing "(2)"-style
+collisions are now checked for right at the start of every run - a
+cheap, disk-only check - instead of only at the end, so a pre-existing
+collision from a past run doesn't need an entire fresh scan (or a full
+manual walkthrough) before ever being surfaced. It also recognizes a
+byte-identical pair as a genuine duplicate and skips it entirely -
+there's no "which one is correct" question when both files are
+literally the same content - reporting it as a plain count instead of
+asking about it, so confirming a duplicate once doesn't mean being
+asked again on every future run forever.
+
 If you installed v1.0.0 and hit an infinite "Press Enter to continue" loop
 that kept re-spawning itself, update to v1.0.1 or later - that version was
 missing `multiprocessing.freeze_support()`, so a worker process would fail
