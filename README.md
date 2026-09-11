@@ -2,7 +2,7 @@
 
 A content-based identification and renaming tool for classic TSR/D&D PDF manuals, matched against a [LaunchBox](https://www.launchbox-app.com/) platform XML catalog.
 
-Download the EXE installer at the link to the right of this summary.
+Download the EXE installer using the link to the right of this summary, under Releases.
 
 If you've got a folder of PDFs with inconsistent, cryptic, or just plain wrong filenames — scanned modules, rulebooks, accessories — this script reads each file's actual content (text, OCR, cover art) and renames it to match its real catalog entry.
 
